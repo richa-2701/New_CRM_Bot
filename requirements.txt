@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+python-dotenv
+requests
+pyodbc
+apscheduler>=3.10.1
