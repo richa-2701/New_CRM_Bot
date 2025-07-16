@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 import dateparser
 
 from app.models import Lead
-from app.crud import get_lead_by_company, create_event
+from app.crud import get_lead_by_company, create_event,get_user_by_name
 from app.reminders import schedule_reminder
 from app.schemas import EventCreate
 from app.message_sender import send_whatsapp_message, format_phone
@@ -81,8 +81,9 @@ async def handle_qualification(msg_text: str, sender: str, reply_url: str):
 
     # 📤 Notify assignee
     if assigned_to:
+        user = get_user_by_name(db, assigned_to)
         send_whatsapp_message(
             reply_url,
-            format_phone(assigned_to),
+            format_phone(user.usernumber),
             f"📢 You have a 4 Phase Meeting assigned for lead:\n🏢 {company_name}\n📅 {event_start.strftime('%d %b %Y')} at {event_start.strftime('%I:%M %p')}"
         )

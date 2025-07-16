@@ -16,12 +16,12 @@ class LeadBase(BaseModel):
     product: Optional[str] = None  # optional for future use
 class LeadCreate(LeadBase):
     created_by: str
-    assigned_to: Optional[int]  # FK to users.id
+    assigned_to: Optional[str]  # FK to users.id
 class LeadOut(LeadBase):
     id: int
     status: str
     created_at: datetime
-    assigned_to: Optional[int]
+    assigned_to: Optional[str]
     model_config = ConfigDict(from_attributes=True)
 class LeadUpdate(BaseModel):
     status: Optional[str]

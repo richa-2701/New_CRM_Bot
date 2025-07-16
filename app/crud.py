@@ -50,7 +50,7 @@ def save_lead(
         segment=lead.segment,
         remark=lead.remark,
         created_by=created_by,
-        assigned_to=assigned_user.id,
+        assigned_to=assigned_user.username,
         created_at=datetime.utcnow()
     )
     db.add(db_lead)

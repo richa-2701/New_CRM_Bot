@@ -23,6 +23,7 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
         # ✅ Required fields check
         required_fields = ["company_name", "contact_name", "phone", "source", "assigned_to"]
         missing_fields = [field for field in required_fields if not parsed_data.get(field)]
+        logger.info(f"🔍 Missing fields: {missing_fields}")
         if missing_fields:
             polite_msg = (
                 "🙏 Please provide these required fields to create the lead:\n"
@@ -52,7 +53,7 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
             send_whatsapp_message(reply_url, created_by, f"❌ Couldn't find team member '{assigned_to_input}' in the system.")
             return {"status": "error", "detail": f"User '{assigned_to_input}' not found"}
 
-        assigned_to = assigned_user.id  # 👈 use user.id (int)
+        assigned_to = assigned_user.username  # 👈 use user.id (int)
 
         # 🧾 Prepare lead data with only required + optional fields
         lead_data = LeadCreate(
@@ -79,10 +80,10 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
         send_whatsapp_message(reply_url, created_by, f"✅ New lead created: {created.company_name}")
 
         # 📢 Notify assignee
-        if assigned_user.phone:
+        if assigned_user.usernumber:
             send_whatsapp_message(
                 reply_url,
-                format_phone(assigned_user.phone),
+                format_phone(assigned_user.usernumber),
                 f"📢 You have been assigned a new lead:\n🏢 {created.company_name}\n👤 {created.contact_name}, 📞 {created.phone}"
             )
 
