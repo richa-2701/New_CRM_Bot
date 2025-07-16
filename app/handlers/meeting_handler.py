@@ -4,14 +4,15 @@ from sqlalchemy.orm import Session
 import dateparser
 import logging
 
-from app.models import Lead, Event, Demo
+from app.models import Lead, Event
 from app.crud import get_lead_by_company, create_event, get_user_by_phone, get_user_by_name
 from app.schemas import EventCreate
 from app.message_sender import send_whatsapp_message
+from app.temp_store import temp_store  # NEW LINE
 
 logger = logging.getLogger(__name__)
 
-
+# 🔹 Parse input message for scheduling
 def extract_details_for_event(text: str):
     company_name, assigned_to, meeting_time_str = None, None, None
     match = re.search(
@@ -24,7 +25,7 @@ def extract_details_for_event(text: str):
         meeting_time_str = match.group(3).strip()
     return company_name, assigned_to, meeting_time_str
 
-
+# ✅ Handle Meeting Scheduling
 async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: str, reply_url: str):
     try:
         company_name, assigned_to_name, meeting_time_str = extract_details_for_event(message_text)
@@ -56,8 +57,8 @@ async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: 
         new_event = create_event(db, event=event_data)
         logger.info(f"✅ Meeting event created with ID: {new_event.id} for lead: {lead.company_name}")
 
-        creator_msg = f"✅ Meeting scheduled for '{lead.company_name}' with {assigned_to_name.title()} on {meeting_dt.strftime('%A, %b %d at %I:%M %p')}."
-        send_whatsapp_message(reply_url, sender_phone, creator_msg)
+        confirmation = f"✅ Meeting scheduled for '{lead.company_name}' with {assigned_to_name.title()} on {meeting_dt.strftime('%A, %b %d at %I:%M %p')}."
+        send_whatsapp_message(reply_url, sender_phone, confirmation)
 
         return {"status": "success"}
 
@@ -66,19 +67,7 @@ async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: 
         send_whatsapp_message(reply_url, sender_phone, "❌ An internal error occurred while scheduling the meeting.")
         return {"status": "error", "details": str(e)}
 
-
-# ✅ Post-meeting update and check for missing lead fields
-
-def extract_company_name_from_meeting_update(msg_text: str) -> str:
-    match = re.search(r"meeting done for (.+?)(?:\.|,| is| they|$)", msg_text, re.IGNORECASE)
-    return match.group(1).strip() if match else ""
-
-
-def extract_remark_from_meeting_update(msg_text: str) -> str:
-    match = re.search(r"(they .*|remark[:\-]?\s*.+)", msg_text, re.IGNORECASE)
-    return match.group(1).strip().lstrip("Remark:").strip() if match else "No remark provided."
-
-
+# ✅ Mark Meeting as Done
 async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, reply_url: str):
     company_name = extract_company_name_from_meeting_update(msg_text)
     remark = extract_remark_from_meeting_update(msg_text)
@@ -90,7 +79,7 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
 
     meeting_event = db.query(Event).filter(
         Event.lead_id == lead.id,
-        Event.event_type == "Meeting"
+        Event.event_type.in_(["4 Phase Meeting","Meeting"])
     ).order_by(Event.event_time.desc()).first()
 
     if not meeting_event:
@@ -105,7 +94,7 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
         f"✅ Meeting marked done for {company_name}.\n📝 Remark: {remark}"
     )
 
-    # ✅ Check for missing optional fields
+    # 🔎 Check for missing optional lead fields
     missing_fields = []
     if not lead.address:
         missing_fields.append("Address")
@@ -115,7 +104,7 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
         missing_fields.append("Team Size")
     if not lead.email:
         missing_fields.append("Email")
-    if not lead.remarks:
+    if not lead.remark:
         missing_fields.append("Remark")
 
     if missing_fields:
@@ -126,13 +115,14 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
         )
         send_whatsapp_message(reply_url, sender, ask_msg)
 
+        # 🔹 Store for follow-up updates
+        temp_store.set(sender, company_name, ttl=300)
+
     return {"status": "success", "message": "Meeting marked done"}
 
-
-
+# ✅ Reschedule Meeting
 async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, reply_url: str):
     try:
-        # Step 1: Extract company and new datetime
         match = re.search(r"reschedule\s+meeting\s+for\s+(.+?)\s+on\s+(.+)", msg_text, re.IGNORECASE)
         if not match:
             send_whatsapp_message(reply_url, sender,
@@ -142,24 +132,21 @@ async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, rep
         company_name = match.group(1).strip()
         new_time_str = match.group(2).strip()
 
-        # Step 2: Parse datetime
         new_datetime = dateparser.parse(new_time_str, settings={'PREFER_DATES_FROM': 'future'})
         if not new_datetime:
             send_whatsapp_message(reply_url, sender,
                 f"❌ Couldn't parse new meeting time: '{new_time_str}'")
             return {"status": "error", "message": "Invalid datetime"}
 
-        # Step 3: Find lead
         lead = get_lead_by_company(db, company_name)
         if not lead:
             send_whatsapp_message(reply_url, sender,
                 f"❌ Lead not found for company: {company_name}")
             return {"status": "error", "message": "Company not found"}
 
-        # Step 4: Find the latest scheduled Meeting (include variants)
         event = db.query(Event).filter(
             Event.lead_id == lead.id,
-            Event.event_type.in_(["Meeting", "4 Phase Meeting"])  # Accept both types
+            Event.event_type.in_(["4 Phase Meeting","Meeting"])
         ).order_by(Event.event_time.desc()).first()
 
         if not event:
@@ -167,21 +154,17 @@ async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, rep
                 f"⚠️ No existing meeting found for {company_name}")
             return {"status": "error", "message": "No existing meeting"}
 
-        # Step 5: Reschedule
         event.event_time = new_datetime
         event.remark = f"Rescheduled via WhatsApp by {sender}"
 
-        # Optional: update updated_at if you have that field in Event
         if hasattr(event, "updated_at"):
             event.updated_at = datetime.now()
 
         db.commit()
 
-        # Notify the user
         send_whatsapp_message(reply_url, sender,
             f"✅ Meeting for *{company_name}* rescheduled to {new_datetime.strftime('%d %b %Y at %I:%M %p')}.")
 
-        # Notify the assignee if exists
         if event.assigned_to:
             send_whatsapp_message(reply_url, event.assigned_to,
                 f"📢 Meeting for *{company_name}* has been rescheduled.\n📅 New Time: {new_datetime.strftime('%d %b %Y at %I:%M %p')}")
@@ -192,3 +175,12 @@ async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, rep
         logging.exception("❌ Exception during meeting reschedule")
         send_whatsapp_message(reply_url, sender, "❌ Internal error while rescheduling meeting.")
         return {"status": "error", "details": str(e)}
+
+# 🔎 Extractors
+def extract_company_name_from_meeting_update(msg_text: str) -> str:
+    match = re.search(r"meeting done for (.+?)(?:\.|,| is| they|$)", msg_text, re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+def extract_remark_from_meeting_update(msg_text: str) -> str:
+    match = re.search(r"(they .*|remark[:\-]?\s*.+)", msg_text, re.IGNORECASE)
+    return match.group(1).strip().lstrip("Remark:").strip() if match else "No remark provided."

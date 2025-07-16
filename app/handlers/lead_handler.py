@@ -1,10 +1,14 @@
 import logging
 from sqlalchemy.orm import Session
-from app.crud import get_user_by_phone, get_user_by_name
+from app.crud import (
+    get_user_by_phone,
+    get_user_by_name,
+    get_lead_by_company,
+    create_lead,
+)
 from app.message_sender import send_whatsapp_message, format_phone
 from app.schemas import LeadCreate
 from app.gpt_parser import parse_lead_info
-from app.crud import get_lead_by_company,create_lead
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +57,7 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
             send_whatsapp_message(reply_url, created_by, f"❌ Couldn't find team member '{assigned_to_input}' in the system.")
             return {"status": "error", "detail": f"User '{assigned_to_input}' not found"}
 
-        assigned_to = assigned_user.username  # 👈 use user.id (int)
+        assigned_to = assigned_user.username  # 👈 use username
 
         # 🧾 Prepare lead data with only required + optional fields
         lead_data = LeadCreate(
@@ -92,4 +96,30 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
     except Exception as e:
         logger.error("❌ Error in handle_new_lead: %s", str(e), exc_info=True)
         send_whatsapp_message(reply_url, created_by, "❌ An error occurred while creating the lead")
+        return {"status": "error", "detail": str(e)}
+
+# ✅ New: Update existing lead
+async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str):
+    try:
+        parsed_data, _ = parse_lead_info(message_text)
+
+        lead = get_lead_by_company(db, company_name)
+        if not lead:
+            send_whatsapp_message(reply_url, sender, f"❌ No existing lead found for {company_name}")
+            return {"status": "error", "message": "Lead not found"}
+
+        # 🛠 Update only if fields are present
+        lead.address = parsed_data.get("address") or lead.address
+        lead.segment = parsed_data.get("segment") or lead.segment
+        lead.team_size = parsed_data.get("team_size") or lead.team_size
+        lead.email = parsed_data.get("email") or lead.email
+        lead.remark = parsed_data.get("remark") or lead.remark
+
+        db.commit()
+        send_whatsapp_message(reply_url, sender, f"✅ Lead '{company_name}' updated successfully.")
+        return {"status": "success"}
+
+    except Exception as e:
+        logger.error("❌ Error in handle_update_lead: %s", str(e), exc_info=True)
+        send_whatsapp_message(reply_url, sender, f"❌ Failed to update lead for '{company_name}'")
         return {"status": "error", "detail": str(e)}
