@@ -1,3 +1,4 @@
+# lead_handler.py
 import logging
 from sqlalchemy.orm import Session
 from app.crud import (
@@ -9,6 +10,7 @@ from app.crud import (
 from app.message_sender import send_whatsapp_message, format_phone
 from app.schemas import LeadCreate
 from app.gpt_parser import parse_lead_info
+from app.temp_store import temp_store
 
 logger = logging.getLogger(__name__)
 
@@ -98,26 +100,39 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
         send_whatsapp_message(reply_url, created_by, "❌ An error occurred while creating the lead")
         return {"status": "error", "detail": str(e)}
 
-# ✅ New: Update existing lead
-async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str):
+async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str = None):
     try:
         parsed_data, _ = parse_lead_info(message_text)
+
+        # ⏪ Fallback: use temp store if company_name not provided
+        if not company_name:
+            company_name = parsed_data.get("company_name") or temp_store.get(sender)
+            if not company_name:
+                send_whatsapp_message(reply_url, sender, "⚠️ Please provide the company name.")
+                return {"status": "error", "message": "Company name missing."}
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
             send_whatsapp_message(reply_url, sender, f"❌ No existing lead found for {company_name}")
             return {"status": "error", "message": "Lead not found"}
 
-        # 🛠 Update only if fields are present
+        # 🛠 Update only the fields that are present
         lead.address = parsed_data.get("address") or lead.address
         lead.segment = parsed_data.get("segment") or lead.segment
         lead.team_size = parsed_data.get("team_size") or lead.team_size
         lead.email = parsed_data.get("email") or lead.email
         lead.remark = parsed_data.get("remark") or lead.remark
+        lead.status = parsed_data.get("status") or lead.status
+
+        logger.info(f"🔄 Updating lead {lead.id} with data: {parsed_data}")
 
         db.commit()
+
+        # 💾 Store company for fallback in next messages
+        temp_store.set(sender, company_name)
+
         send_whatsapp_message(reply_url, sender, f"✅ Lead '{company_name}' updated successfully.")
-        return {"status": "success"}
+        return {"status": "success", "message": "Lead updated"}
 
     except Exception as e:
         logger.error("❌ Error in handle_update_lead: %s", str(e), exc_info=True)

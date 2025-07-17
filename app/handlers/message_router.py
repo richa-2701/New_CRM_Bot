@@ -1,3 +1,5 @@
+# message_router.py
+
 import re
 import logging
 from sqlalchemy.orm import Session
@@ -14,7 +16,7 @@ from app.handlers import (
     reassignment_handler,
     reminder_handler,
 )
-from app.temp_store import temp_store  # ✅ Added import
+from app.temp_store import temp_store  # ✅ Context store
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +61,9 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             send_whatsapp_message(reply_url, sender, polite_msg)
             return {"status": "prompted_for_lead"}
 
-        recent_company = temp_store.get(sender)  # ✅ Get recent company name if any
+        recent_company = temp_store.get(sender)  # ✅ Check context for update
         if intent == "new_lead" and recent_company:
-            return await lead_handler.handle_update_lead(  # ✅ Call update handler
+            return await lead_handler.handle_update_lead(
                 db=db,
                 message_text=message_text,
                 sender=sender,
@@ -70,7 +72,7 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             )
 
         if intent == "new_lead":
-            return lead_handler.handle_new_lead(
+            return await lead_handler.handle_new_lead(
                 db=db,
                 message_text=message_text,
                 created_by=sender,
@@ -98,6 +100,7 @@ async def route_message(sender: str, message_text: str, reply_url: str):
                 send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
                 return {"status": "error", "message": "Company name missing"}
             return await meeting_handler.handle_post_meeting_update(db, message_text, sender, reply_url)
+
         elif intent == "demo_done":
             return await demo_handler.handle_post_demo(db, message_text, sender, reply_url)
 
@@ -124,8 +127,6 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             update_lead_status(db, company, "Not Our Segment")
             send_whatsapp_message(reply_url, sender, f"📂 Marked '{company}' as 'Not Our Segment'.")
             return {"status": "success"}
-        
-        
 
         else:
             fallback = (

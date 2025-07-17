@@ -6,7 +6,7 @@ import logging
 
 from app.models import Lead, Demo, Feedback, Reminder,User
 from app.message_sender import send_whatsapp_message
-from app.crud import get_user_by_phone, get_user_by_name
+from app.crud import get_user_by_phone, get_user_by_name,get_lead_by_company
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,10 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
     try:
         company_name = extract_company_name(message_text)
         logger.info(f"Handling post-demo for company: {company_name}")
+        lead = get_lead_by_company(db, company_name)
+        if not lead:
+            send_whatsapp_message(reply_url, sender, f"❌ Lead not found for company: {company_name}")
+            return {"status": "error", "message": "Company not found"}
 
         if not company_name:
             send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
@@ -170,6 +174,7 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
         demo.phase = "Done"
         demo.remark = message_text.strip()
         demo.updated_at = datetime.utcnow()
+        lead.status = "Demo Done"
 
         # ⏰ Set reminder for follow-up after 3 days
         follow_up_time = demo.start_time + timedelta(days=3)
