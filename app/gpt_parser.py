@@ -136,5 +136,9 @@ def parse_intent_and_fields(message: str):
 
     if message.count(",") >= 3:  # Detect comma-based structured lead message
         return "new_lead", {}
+    
+    if re.search(r"demo (is )?done|demo completed|demo finished|demo ho gya|demo ho gaya", lowered):
+        return "demo_done", {}
+
 
     return "unknown", {}

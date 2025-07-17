@@ -43,7 +43,7 @@ class Lead(Base):
     remark = Column(Text, nullable=True)
     status = Column(String, default="new")
     created_by = Column(String)
-    assigned_to = Column(Integer, ForeignKey("users.id"))
+    assigned_to = Column(String, ForeignKey("users.username"))
     created_at = Column(DateTime, default=datetime.utcnow)
     assigned_to_user = relationship("User", back_populates="leads")
     meetings = relationship("Meeting", back_populates="lead")
@@ -78,6 +78,7 @@ class Event(Base):
     event_time = Column(DateTime)
     created_by = Column(String)
     remark = Column(String)
+    phase = Column(String, default="Scheduled")  # e.g., Scheduled, Done
     created_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="events")
 
@@ -127,6 +128,7 @@ class Demo(Base):
     assigned_to = Column(String)
     start_time = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
+    phase = Column(String, default="Scheduled")  # e.g., Scheduled, Done
     lead = relationship("Lead", back_populates="demos")
 
 

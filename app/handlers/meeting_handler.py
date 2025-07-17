@@ -86,7 +86,7 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
         send_whatsapp_message(reply_url, sender, f"⚠️ No meeting found for {company_name}")
         return {"status": "error", "message": "No meeting found"}
 
-    meeting_event.status = "done"
+    meeting_event.phase = "Done"
     meeting_event.remark = remark
     db.commit()
 

@@ -98,6 +98,8 @@ async def route_message(sender: str, message_text: str, reply_url: str):
                 send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
                 return {"status": "error", "message": "Company name missing"}
             return await meeting_handler.handle_post_meeting_update(db, message_text, sender, reply_url)
+        elif intent == "demo_done":
+            return await demo_handler.handle_post_demo(db, message_text, sender, reply_url)
 
         elif intent == "feedback":
             company_name = extract_company_name(message_text)
@@ -123,9 +125,7 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             send_whatsapp_message(reply_url, sender, f"📂 Marked '{company}' as 'Not Our Segment'.")
             return {"status": "success"}
         
-        elif "demo done" in lowered_text or "demo is done" in lowered_text:
-            return await demo_handler.handle_post_demo(db, message_text, sender, reply_url)
-
+        
 
         else:
             fallback = (

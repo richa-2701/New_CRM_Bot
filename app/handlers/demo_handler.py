@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 import dateparser
 import logging
 
-from app.models import Lead, Demo, Feedback, Reminder
+from app.models import Lead, Demo, Feedback, Reminder,User
 from app.message_sender import send_whatsapp_message
 from app.crud import get_user_by_phone, get_user_by_name
 
@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 
 def extract_company_name(text: str) -> str:
     match = re.search(
-        r"(?:demo\s+for|meeting\s+done\s+for|for)\s+(.*?)(?=\s+(on|at|by|is|they|and|\.|,|$))",
-        text,
-        re.IGNORECASE
+        r"(?:demo\s+done\s+for|demo\s+for|meeting\s+done\s+for|for)\s+(.+?)(?:\s+(?:on|at|by|is|they|and)\b|[.,]|$)",
+    text,
+    re.IGNORECASE
     )
     return match.group(1).strip() if match else ""
 
@@ -150,6 +150,8 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
 async def handle_post_demo(db: Session, message_text: str, sender: str, reply_url: str):
     try:
         company_name = extract_company_name(message_text)
+        logger.info(f"Handling post-demo for company: {company_name}")
+
         if not company_name:
             send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
             return {"status": "error", "message": "Company name missing"}
@@ -165,25 +167,31 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
             return {"status": "error", "message": "No demo found"}
 
         # ✅ Update demo status and save remark
-        demo.status = "Done"
+        demo.phase = "Done"
         demo.remark = message_text.strip()
         demo.updated_at = datetime.utcnow()
 
         # ⏰ Set reminder for follow-up after 3 days
         follow_up_time = demo.start_time + timedelta(days=3)
 
+        # 🔄 Resolve username to user ID if needed
+        user = db.query(User).filter((User.username == lead.assigned_to) | (User.id == lead.id)).first()
+        if not user:
+            raise Exception(f"Assigned user '{lead.assigned_to}' not found")
+
         reminder = Reminder(
             lead_id=lead.id,
-            user_id=lead.assigned_to,         # Assuming this is an ID or username
-            assigned_to=lead.assigned_to,     # Same as above
+            user_id=user.id,
+            assigned_to=user.id,
             remind_time=follow_up_time,
-            message=f"🔔 Follow-up with {company_name} after demo"
+            message=f"🔔 Follow-up with {company_name} after demo",
+            status="follow up",
+            created_at=datetime.utcnow()
         )
         db.add(reminder)
         db.commit()
 
         send_whatsapp_message(reply_url, sender, f"✅ Marked demo for '{company_name}' as Done and set reminder.")
-
         return {"status": "success", "message": "Demo marked as done and reminder set"}
 
     except Exception as e:
