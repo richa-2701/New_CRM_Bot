@@ -1,3 +1,4 @@
+# app/message_sender.py
 import os
 import requests
 import time
@@ -6,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MAYT_API_URL = os.getenv("MAYT_API_URL")
-MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "532fa6b9-7c75-402e-a01b-4e603fda0770")  # fallback if .env missing
+MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "1fec7901-7cf7-4bf7-82d9-753299c45ce3")  # fallback if .env missing
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 

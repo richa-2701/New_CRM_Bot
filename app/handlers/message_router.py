@@ -1,5 +1,4 @@
-# message_router.py
-
+# app/handlers/message_router.py
 import re
 import logging
 from sqlalchemy.orm import Session
@@ -12,32 +11,53 @@ from app.handlers import (
     qualification_handler,
     meeting_handler,
     demo_handler,
-    feedback_handler,
     reassignment_handler,
     reminder_handler,
 )
-from app.temp_store import temp_store  # ✅ Context store
+from app.temp_store import temp_store
+# Import the context dict directly to check its state
+from app.handlers.qualification_handler import pending_context
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
-
-def extract_company_name(text: str) -> str:
-    patterns = [
-        r"(?:for|with|of)\s+([A-Za-z0-9\s&.'-]+?)(?=\s+on|\s+at|\s+to|\s+next|\s+is|$|,)"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            company = match.group(1).strip()
-            if company.lower() in ["the", "a", "an"]:
-                continue
-            return company
-    return ""
 
 async def route_message(sender: str, message_text: str, reply_url: str):
     db: Session = SessionLocal()
     lowered_text = message_text.lower().strip()
 
     try:
+        # 🔁 CRITICAL: First, check if there's a pending multi-step action for this user.
+        if sender in pending_context:
+            context = pending_context[sender]
+            logger.info(f"Found pending context for {sender}: {context}")
+            if context.get("intent") == "qualification_pending":
+                logger.info(f"Routing follow-up message from {sender} to qualification handler.")
+                return await qualification_handler.handle_qualification(
+                    db=db,
+                    msg_text=message_text,
+                    sender=sender,
+                    reply_url=reply_url,
+                )
+            elif context.get("intent") == "awaiting_qualification_details":
+                logger.info(f"Routing qualification details update from {sender} to its handler.")
+                return await qualification_handler.handle_qualification_update(
+                    db=db,
+                    msg_text=message_text,
+                    sender=sender,
+                    reply_url=reply_url,
+                )
+            # --- NEW ROUTING LOGIC ---
+            elif context.get("intent") == "awaiting_meeting_details":
+                logger.info(f"Routing meeting details update from {sender} to its handler.")
+                return await meeting_handler.handle_meeting_details_update(
+                    db=db,
+                    msg_text=message_text,
+                    sender=sender,
+                    reply_url=reply_url,
+                )
+            # --- END NEW ROUTING LOGIC ---
+
+        # If no pending action, parse the intent of the new message.
         intent, _ = parse_intent_and_fields(lowered_text)
         logger.info(f"Detected Intent: {intent} for message: '{message_text}'")
 
@@ -50,26 +70,16 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             polite_msg = (
                 "👋 Hi! To create a new lead, please provide the following details:\n\n"
                 "📌 Company Name\n"
-                "👤 Contact Person Name\n"
+                "👤 Concern Person Name\n"
                 "📱 Phone Number\n"
                 "📍 Source\n"
                 "👨‍💼 Assigned To (Name or Phone)\n\n"
-                "🗒️ Example:\n"
-                "'There is a lead from ABC Pvt Ltd, contact is Ramesh (9876543210), Source Referral, interested in inventory software, assign to Banwari.'"
-                "✅ Format 2: Comma-Separated \n ABC Pvt Ltd, Ramesh, 9876543210, Jaipur, Inventory Software, Banwari'"
+                "📒 Example:\n"
+                "'There is a lead from ABC Pvt Ltd, contact is Ramesh (9876543210), Source Referral, interested in inventory software, assign to Banwari.'\n"
+                "✅ Format 2: Comma-Separated \n ABC Pvt Ltd, Ramesh, 9876543210, Jaipur, Inventory Software, Banwari"
             )
             send_whatsapp_message(reply_url, sender, polite_msg)
             return {"status": "prompted_for_lead"}
-
-        recent_company = temp_store.get(sender)  # ✅ Check context for update
-        if intent == "new_lead" and recent_company:
-            return await lead_handler.handle_update_lead(
-                db=db,
-                message_text=message_text,
-                sender=sender,
-                reply_url=reply_url,
-                company_name=recent_company
-            )
 
         if intent == "new_lead":
             return await lead_handler.handle_new_lead(
@@ -80,11 +90,16 @@ async def route_message(sender: str, message_text: str, reply_url: str):
             )
 
         if intent == "qualify_lead":
-            return await qualification_handler.handle_qualification(message_text, sender, reply_url)
+            return await qualification_handler.handle_qualification(
+                db=db,
+                msg_text=message_text,
+                sender=sender,
+                reply_url=reply_url,
+            )
 
         elif "reschedule meeting" in lowered_text:
             return await meeting_handler.handle_reschedule_meeting(db, message_text, sender, reply_url)
-
+        
         elif intent == "schedule_meeting":
             return await meeting_handler.handle_meeting_schedule(db, message_text, sender, reply_url)
 
@@ -93,51 +108,36 @@ async def route_message(sender: str, message_text: str, reply_url: str):
 
         elif "reschedule demo" in lowered_text or "demo reschedule" in lowered_text:
             return await demo_handler.handle_demo_reschedule(db, message_text, sender, reply_url)
-
+            
         elif "meeting done" in lowered_text or "meeting is done" in lowered_text:
-            company = extract_company_name(message_text)
-            if not company:
-                send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
-                return {"status": "error", "message": "Company name missing"}
             return await meeting_handler.handle_post_meeting_update(db, message_text, sender, reply_url)
 
         elif intent == "demo_done":
             return await demo_handler.handle_post_demo(db, message_text, sender, reply_url)
-
-        elif intent == "feedback":
-            company_name = extract_company_name(message_text)
-            return await feedback_handler.handle_feedback(db, company_name, message_text, sender, reply_url)
 
         elif intent == "reminder":
             return await reminder_handler.handle_set_reminder(db, message_text, sender, reply_url)
 
         elif intent == "reassign_task":
             return await reassignment_handler.handle_reassignment(db, message_text, sender, reply_url)
-
-        elif "not interested" in lowered_text:
-            company = extract_company_name(message_text)
-            remark_match = re.search(r"(?:because|reason|remark)\s+(.*)", message_text, re.IGNORECASE)
-            remark = remark_match.group(1).strip() if remark_match else "Not interested after initial contact."
-            update_lead_status(db, company, "Unqualified", remark=remark)
-            send_whatsapp_message(reply_url, sender, f"✅ Marked '{company}' as Unqualified. Remark: '{remark}'.")
-            return {"status": "success"}
-
-        elif "not in our segment" in lowered_text:
-            company = extract_company_name(message_text)
-            update_lead_status(db, company, "Not Our Segment")
-            send_whatsapp_message(reply_url, sender, f"📂 Marked '{company}' as 'Not Our Segment'.")
-            return {"status": "success"}
-
+            
         else:
+            # Fallback message is now more accurate since conversational replies are handled
+            # before this point.
             fallback = (
-                "🤖 I didn't understand that. You can say:\n"
-                "'New lead from ABC, contact is Ramesh 98765..., city Jaipur, assign to Banwari.'"
+                "🤖 I didn't understand that command. You can say things like:\n"
+                "➡️ 'New lead ...'\n"
+                "➡️ 'Lead is qualified for ...'\n"
+                "➡️ 'Schedule meeting with ...'"
             )
             send_whatsapp_message(reply_url, sender, fallback)
             return {"status": "unhandled"}
 
     except Exception as e:
         logger.error(f"❌ Exception in route_message: {e}", exc_info=True)
+        # On a critical failure, clear the user's context to prevent them from being stuck.
+        if sender in pending_context:
+            pending_context.pop(sender, None)
         send_whatsapp_message(reply_url, sender, "❌ Internal error occurred.")
         return {"status": "error", "detail": str(e)}
 

@@ -9,24 +9,22 @@ from app.crud import (
 )
 from app.message_sender import send_whatsapp_message, format_phone
 from app.schemas import LeadCreate
-from app.gpt_parser import parse_lead_info
+from app.gpt_parser import parse_lead_info, parse_update_fields
 from app.temp_store import temp_store
 
 logger = logging.getLogger(__name__)
 
-def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: str):
+# --- CORRECTED LINE: Changed 'def' to 'async def' ---
+async def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: str):
     try:
-        # 🔍 Parse message using GPT parser
         parsed_data, polite_message = parse_lead_info(message_text)
 
-        # ❗ If parsing failed or missing fields
         if isinstance(parsed_data, dict) and parsed_data.get("missing_fields"):
             send_whatsapp_message(reply_url, created_by, polite_message)
             return {"status": "error", "detail": polite_message}
 
         logger.info("🎯 Handling new lead with parsed data: %s", parsed_data)
 
-        # ✅ Required fields check
         required_fields = ["company_name", "contact_name", "phone", "source", "assigned_to"]
         missing_fields = [field for field in required_fields if not parsed_data.get(field)]
         logger.info(f"🔍 Missing fields: {missing_fields}")
@@ -38,13 +36,11 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
             send_whatsapp_message(reply_url, created_by, polite_msg)
             return {"status": "error", "detail": f"Missing field(s): {', '.join(missing_fields)}"}
 
-        # 🔁 Duplicate company check
         existing = get_lead_by_company(db, parsed_data["company_name"])
         if existing:
             send_whatsapp_message(reply_url, created_by, f"⚠️ Lead for '{parsed_data['company_name']}' already exists.")
             return {"status": "error", "detail": "Lead already exists"}
 
-        # 👨‍💼 Resolve assigned_to (if it's name or phone, get user and use user.id)
         assigned_to_input = parsed_data.get("assigned_to")
         assigned_user = None
 
@@ -59,9 +55,8 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
             send_whatsapp_message(reply_url, created_by, f"❌ Couldn't find team member '{assigned_to_input}' in the system.")
             return {"status": "error", "detail": f"User '{assigned_to_input}' not found"}
 
-        assigned_to = assigned_user.username  # 👈 use username
+        assigned_to = assigned_user.username
 
-        # 🧾 Prepare lead data with only required + optional fields
         lead_data = LeadCreate(
             company_name=parsed_data["company_name"],
             contact_name=parsed_data["contact_name"],
@@ -73,19 +68,15 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
             team_size=parsed_data.get("team_size"),
             remark=parsed_data.get("remark"),
             product=parsed_data.get("product"),
-            city=parsed_data.get("city"),
-            status="New Lead",  # ✅ Always set status to "New Lead"
+            status="New Lead",
             assigned_to=assigned_to,
             created_by=created_by,
         )
 
-        # 💾 Create the lead in DB
         created = create_lead(db, lead_data, created_by, assigned_to)
 
-        # ✅ Notify creator
         send_whatsapp_message(reply_url, created_by, f"✅ New lead created: {created.company_name}")
 
-        # 📢 Notify assignee
         if assigned_user.usernumber:
             send_whatsapp_message(
                 reply_url,
@@ -101,40 +92,44 @@ def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: 
         return {"status": "error", "detail": str(e)}
 
 async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str = None):
-    try:
-        parsed_data, _ = parse_lead_info(message_text)
+    
 
-        # ⏪ Fallback: use temp store if company_name not provided
+    try:
+        update_fields = parse_update_fields(message_text)
+
+        # Use company_name from context or memory
+        company_name = company_name or update_fields.get("company_name") or temp_store.get(sender)
         if not company_name:
-            company_name = parsed_data.get("company_name") or temp_store.get(sender)
-            if not company_name:
-                send_whatsapp_message(reply_url, sender, "⚠️ Please provide the company name.")
-                return {"status": "error", "message": "Company name missing."}
+            send_whatsapp_message(reply_url, sender, "⚠️ Please mention the company name.")
+            return {"status": "error", "message": "Missing company name."}
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ No existing lead found for {company_name}")
-            return {"status": "error", "message": "Lead not found"}
+            send_whatsapp_message(reply_url, sender, f"❌ No lead found for {company_name}")
+            return {"status": "error", "message": f"Lead not found for {company_name}"}
 
-        # 🛠 Update only the fields that are present
-        lead.address = parsed_data.get("address") or lead.address
-        lead.segment = parsed_data.get("segment") or lead.segment
-        lead.team_size = parsed_data.get("team_size") or lead.team_size
-        lead.email = parsed_data.get("email") or lead.email
-        lead.remark = parsed_data.get("remark") or lead.remark
-        lead.status = parsed_data.get("status") or lead.status
+        # Update matching fields
+        updated_fields = []
+        for field, value in update_fields.items():
+            if hasattr(lead, field) and value:
+                setattr(lead, field, value)
+                updated_fields.append(field)
 
-        logger.info(f"🔄 Updating lead {lead.id} with data: {parsed_data}")
+        if not updated_fields:
+            send_whatsapp_message(reply_url, sender, "⚠️ No valid fields found to update.")
+            return {"status": "error", "message": "No valid fields to update"}
 
         db.commit()
 
-        # 💾 Store company for fallback in next messages
+        # Remember company for future messages
         temp_store.set(sender, company_name)
 
-        send_whatsapp_message(reply_url, sender, f"✅ Lead '{company_name}' updated successfully.")
-        return {"status": "success", "message": "Lead updated"}
+        send_whatsapp_message(reply_url, sender, f"✅ Lead for '{company_name}' updated: {', '.join(updated_fields)}, Now schedule Demo for '{company_name}'")
+        return {"status": "success", "message": "Lead updated successfully"}
 
     except Exception as e:
-        logger.error("❌ Error in handle_update_lead: %s", str(e), exc_info=True)
-        send_whatsapp_message(reply_url, sender, f"❌ Failed to update lead for '{company_name}'")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("Error updating lead: %s", str(e), exc_info=True)
+        send_whatsapp_message(reply_url, sender, "❌ Something went wrong during update.")
         return {"status": "error", "detail": str(e)}
