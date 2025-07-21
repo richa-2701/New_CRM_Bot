@@ -1,3 +1,4 @@
+# app/handlers/demo_handler.py
 import re
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
@@ -5,7 +6,7 @@ import dateparser
 import logging
 
 from app.models import Lead, Demo, Feedback, Reminder,User
-from app.message_sender import send_whatsapp_message
+from app.message_sender import send_message,send_whatsapp_message
 from app.crud import get_user_by_phone, get_user_by_name,get_lead_by_company
 
 logger = logging.getLogger(__name__)
@@ -39,21 +40,27 @@ def extract_assignee(text: str, db: Session):
     user = get_user_by_phone(db, assignee_raw) if assignee_raw.isdigit() else get_user_by_name(db, assignee_raw)
     return user
 
-async def handle_demo_schedule(db: Session, message_text: str, sender: str, reply_url: str):
+async def handle_demo_schedule(db: Session, message_text: str, sender: str, reply_url: str,source: str = "whatsapp"):
     try:
         company_name = extract_company_name(message_text)
         if not company_name:
-            send_whatsapp_message(reply_url, sender, "⚠️ Could not find the company name.")
+            response = send_message(reply_url, sender, "⚠️ Could not find the company name.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Company name missing"}
 
         date_time = extract_datetime(message_text)
         if not date_time:
-            send_whatsapp_message(reply_url, sender, "⚠️ Could not find a valid date/time.")
+            response = send_message(reply_url, sender, "⚠️ Could not find a valid date/time.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Datetime missing"}
 
         lead = db.query(Lead).filter(Lead.company_name.ilike(f"%{company_name}%")).first()
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ Could not find lead with company: {company_name}")
+            response = send_message(reply_url, sender, f"❌ Could not find lead with company: {company_name}", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Lead not found"}
 
         assignee_user = extract_assignee(message_text, db)
@@ -73,48 +80,60 @@ async def handle_demo_schedule(db: Session, message_text: str, sender: str, repl
         db.add(demo)
         db.commit()
 
-        send_whatsapp_message(reply_url, sender,
-            f"✅ Demo scheduled for {company_name} on {date_time.strftime('%Y-%m-%d %I:%M %p')}\n👤 Assigned to: {assignee_name}")
+        response = send_message(reply_url, sender,
+            f"✅ Demo scheduled for {company_name} on {date_time.strftime('%Y-%m-%d %I:%M %p')}\n👤 Assigned to: {assignee_name}", source)
 
-        if assignee_phone:
-            send_whatsapp_message(reply_url, assignee_phone,
+        if assignee_phone and source.lower() != "app":
+            send_message(reply_url, assignee_phone,
                 f"""
 📢 *You have been assigned a demo*
 
 🏢 Company: {lead.company_name}
 👤 Contact: {lead.contact_name} ({lead.phone})
 🕒 Time: {date_time.strftime('%A, %b %d at %I:%M %p')}
-""")
+""", source)
 
+        if source.lower() == "app":
+            return response
         return {"status": "success"}
-
+    
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Error scheduling demo: {e}", exc_info=True)
-        send_whatsapp_message(reply_url, sender, f"❌ Failed to schedule demo: {str(e)}")
+        response = send_message(reply_url, sender, f"❌ Failed to schedule demo: {str(e)}", source)
+        if source.lower() == "app":
+            return response
         return {"status": "error", "message": str(e)}
 
 
-async def handle_demo_reschedule(db: Session, message_text: str, sender: str, reply_url: str):
+async def handle_demo_reschedule(db: Session, message_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
     try:
         company_name = extract_company_name(message_text)
         if not company_name:
-            send_whatsapp_message(reply_url, sender, "⚠️ Company name not found.")
+            response = send_message(reply_url, sender, "⚠️ Company name not found.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Company name missing"}
 
         lead = db.query(Lead).filter(Lead.company_name.ilike(f"%{company_name}%")).first()
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ No lead found for company '{company_name}'.")
+            response = send_message(reply_url, sender, f"❌ No lead found for company '{company_name}'.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Lead not found"}
 
         demo = db.query(Demo).filter(Demo.lead_id == lead.id).order_by(Demo.start_time.desc()).first()
         if not demo:
-            send_whatsapp_message(reply_url, sender, f"⚠️ No demo found for '{company_name}'.")
+            response = send_message(reply_url, sender, f"⚠️ No demo found for '{company_name}'.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "No demo found"}
 
         new_datetime = extract_datetime(message_text)
         if not new_datetime:
-            send_whatsapp_message(reply_url, sender, "⚠️ Could not find a valid new date/time in the message.")
+            response = send_message(reply_url, sender, "⚠️ Could not find a valid new date/time in the message.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Invalid or missing new datetime"}
 
         # Update assignee only if mentioned
@@ -126,49 +145,61 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
         demo.updated_at = datetime.utcnow()
         db.commit()
 
-        send_whatsapp_message(reply_url, sender,
-            f"🔄 Demo rescheduled for {company_name} on {new_datetime.strftime('%Y-%m-%d %I:%M %p')}.")
-
-        notify_msg = f"""
+        response = send_message(reply_url, sender,
+            f"🔄 Demo rescheduled for {company_name} on {new_datetime.strftime('%Y-%m-%d %I:%M %p')}.", source)
+        
+        if demo.assigned_to and source.lower() != "app":
+            notify_msg = f"""
 📢 *Demo Rescheduled*
 
 🏢 Company: {lead.company_name}
 📞 Contact: {lead.phone}
 📅 New Time: {new_datetime.strftime('%A, %b %d at %I:%M %p')}
 """
-        if demo.assigned_to:
-            send_whatsapp_message(reply_url, demo.assigned_to, notify_msg)
+            send_message(reply_url, demo.assigned_to, notify_msg, source)
+        if source.lower() == "app":
+            return response
 
         return {"status": "success", "message": "Demo rescheduled"}
 
     except Exception as e:
         logger.error(f"❌ Error in demo reschedule: {e}", exc_info=True)
         db.rollback()
-        send_whatsapp_message(reply_url, sender, "❌ Failed to reschedule demo.")
+        response = send_message(reply_url, sender, "❌ Failed to reschedule demo.", source)
+        if source.lower() == "app":
+            return response
         return {"status": "error", "message": str(e)}
     
-async def handle_post_demo(db: Session, message_text: str, sender: str, reply_url: str):
+async def handle_post_demo(db: Session, message_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
     try:
         company_name = extract_company_name(message_text)
         logger.info(f"Handling post-demo for company: {company_name}")
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ Lead not found for company: {company_name}")
+            response = send_message(reply_url, sender, f"❌ Lead not found for company: {company_name}", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Company not found"}
 
         if not company_name:
-            send_whatsapp_message(reply_url, sender, "⚠️ Please include the company name in your message.")
+            response = send_message(reply_url, sender, "⚠️ Please include the company name in your message.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Company name missing"}
 
         lead = db.query(Lead).filter(Lead.company_name.ilike(f"%{company_name}%")).first()
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ Lead not found for '{company_name}'.")
+            response = send_message(reply_url, sender, f"❌ Lead not found for '{company_name}'.")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Lead not found"}
 
         demo = db.query(Demo).filter(Demo.lead_id == lead.id).order_by(Demo.start_time.desc()).first()
         if not demo:
-            send_whatsapp_message(reply_url, sender, f"⚠️ No demo record found for '{company_name}'.")
-            return {"status": "error", "message": "No demo found"}
+             response = send_message(reply_url, sender, f"⚠️ No demo record found for '{company_name}'.", source)
+             if source.lower() == "app":
+                return response
+             return {"status": "error", "message": "No demo found"}
 
         # ✅ Update demo status and save remark
         demo.phase = "Done"
@@ -196,12 +227,16 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
         db.add(reminder)
         db.commit()
 
-        send_whatsapp_message(reply_url, sender, f"✅ Marked demo for '{company_name}' as Done and set reminder.")
+        response = send_message(reply_url, sender, f"✅ Marked demo for '{company_name}' as Done and set reminder.", source)
+        if source.lower() == "app":
+            return response
         return {"status": "success", "message": "Demo marked as done and reminder set"}
 
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Error in handle_post_demo: {e}", exc_info=True)
-        send_whatsapp_message(reply_url, sender, "❌ Failed to update demo status.")
+        response = send_message(reply_url, sender, "❌ Failed to update demo status.", source)
+        if source.lower() == "app":
+            return response
         return {"status": "error", "message": str(e)}
 

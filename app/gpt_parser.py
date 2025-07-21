@@ -118,51 +118,79 @@ User Message:
         return {}, "❌ An unexpected error occurred."
 
 
-def parse_update_fields(msg_text: str):
+def parse_update_fields(message: str):
     """
-    Extract fields for updating a lead from either comma-separated values or sentence.
-    Returns a dictionary of field: value pairs.
+    Uses GPT to extract only optional lead fields from a message for updating an existing lead.
+    Does NOT require company_name or other required fields.
     """
-    update_data = {}
-    msg_text = msg_text.strip().lower()
+    prompt = f"""
+You are an expert CRM assistant. Extract ONLY the following optional fields from the user's message for updating an existing lead.
 
-    field_map = {
-        "company": "company_name",
-        "contact": "contact_name",
-        "name": "contact_name",
-        "phone": "phone",
-        "mobile": "phone",
-        "email": "email",
-        "address": "address",
-        "city": "address",
-        "location": "address",
-        "team": "team_size",
-        "size": "team_size",
-        "source": "source",
-        "segment": "segment",
-        "remark": "remark",
-        "status": "status",
-        "assign": "assigned_to",
-        "assigned": "assigned_to"
+Optional Fields:
+- "email"
+- "address"
+- "team_size"
+- "segment"
+- "remark"
+
+The message may be comma-separated or natural language. 
+👉 If the message is comma-separated, do NOT assume the order. Detect each field by its value and context (e.g., phone numbers, emails, names, addresses, remarks, etc).
+
+Do NOT return required fields like company_name, contact_name, phone, or source.
+If a field is not present, set its value to null.
+Return only JSON. Do not add explanations.
+
+
+User Message:
+\"{message}\"
+"""
+
+    headers = {
+        "Authorization": f"Bearer {GPT_API_KEY}",
+        "Content-Type": "application/json"
     }
 
-    for key, field in field_map.items():
-        if key in msg_text:
-            match = re.search(rf"{key}\s*(is|:)?\s*([a-zA-Z0-9@_.\- ]+)", msg_text)
-            if match:
-                value = match.group(2).strip()
-                update_data[field] = value
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"}
+    }
 
-    if len(update_data) < 3 and ',' in msg_text:
-        parts = [p.strip() for p in msg_text.split(',')]
-        probable_fields = [
-            "company_name", "contact_name", "phone", "address", "team_size", "segment",
-            "email", "remark", "status", "assigned_to"
-        ]
-        for i in range(min(len(parts), len(probable_fields))):
-            update_data[probable_fields[i]] = parts[i]
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
 
-    return update_data
+        if response.status_code != 200:
+            logger.error("❌ GPT API error (%s): %s", response.status_code, response.text)
+            return {}, f"❌ GPT API failed: {response.status_code}"
+
+        result_content = response.json()["choices"][0]["message"]["content"]
+        logger.info(f"🔍 Raw GPT Response: {result_content}")
+
+        try:
+            data = json.loads(result_content)
+        except json.JSONDecodeError:
+            logger.error("❌ GPT returned invalid JSON")
+            return {}, "❌ GPT returned invalid JSON"
+
+        # Only keep optional fields
+        optional = ["email", "address", "team_size", "segment", "remark"]
+        update_data = {k: v for k, v in data.items() if k in optional}
+
+        return update_data, "✅ Lead update fields parsed successfully."
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ GPT API request error: {e}")
+        return {}, "❌ Could not connect to the AI service."
+    except Exception as e:
+        logger.error(f"❌ GPT processing error: {e}")
+        return {}, "❌ An unexpected error occurred."
+
 
 
 def parse_update_company(message: str) -> str:

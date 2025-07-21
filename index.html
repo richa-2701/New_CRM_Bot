@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat Bot</title>
+    <!-- Using Font Awesome for icons to match the Flutter app -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* Basic Resets and Font */
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        /* Main chat container to mimic a phone screen */
+        #chat-container {
+            width: 100%;
+            max-width: 450px;
+            height: 95vh;
+            max-height: 800px;
+            display: flex;
+            flex-direction: column;
+            background-color: #ffffff;
+            border-radius: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            overflow: hidden;
+        }
+
+        /* Header (like AppBar) */
+        #chat-header {
+            background-color: #4A90E2; /* A nice blue color */
+            color: white;
+            padding: 16px;
+            text-align: center;
+            font-size: 1.2rem;
+            font-weight: 500;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        /* Message List Area */
+        #message-list {
+            flex-grow: 1;
+            padding: 16px 8px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Individual Message Bubble */
+        .message {
+            max-width: 75%;
+            padding: 10px 16px;
+            border-radius: 20px;
+            margin-bottom: 8px;
+            display: flex;
+            flex-direction: column;
+            line-height: 1.4;
+        }
+
+        .message .text {
+            font-size: 16px;
+        }
+
+        .message .timestamp {
+            font-size: 10px;
+            margin-top: 4px;
+            text-align: right;
+            opacity: 0.8;
+        }
+        
+        /* Bot Message Styling */
+        .bot-message {
+            background-color: #e9ecef; /* Flutter's Colors.grey[200] */
+            color: #343a40;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+
+        /* User Message Styling */
+        .user-message {
+            background-color: #bbdefb; /* Flutter's Colors.blue[100] */
+            color: #1c1c1c;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+
+        .user-message .timestamp {
+             color: #546e7a; /* Flutter's Colors.blueGrey[600] */
+        }
+
+        .bot-message .timestamp {
+             color: #6c757d; /* Flutter's Colors.grey[600] */
+        }
+
+
+        /* Input Area at the bottom */
+        #input-area {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-top: 1px solid #e0e0e0;
+            background-color: #ffffff;
+        }
+
+        #message-input {
+            flex-grow: 1;
+            border: none;
+            outline: none;
+            padding: 12px;
+            font-size: 16px;
+            background-color: transparent;
+        }
+
+        #input-area button {
+            background: none;
+            border: none;
+            padding: 10px;
+            cursor: pointer;
+            color: #4A90E2;
+            font-size: 22px;
+            transition: color 0.2s ease-in-out;
+        }
+
+        #input-area button:hover {
+            color: #357ABD;
+        }
+
+        /* Style for the microphone when listening */
+        #mic-button.listening {
+            color: #e74c3c; /* Red color like in the Flutter app */
+        }
+    </style>
+</head>
+<body>
+
+    <div id="chat-container">
+        <div id="chat-header">Chat Bot</div>
+        <div id="message-list">
+            <!-- Messages will be dynamically added here -->
+        </div>
+        <div id="input-area">
+            <button id="mic-button" title="Start/Stop Listening">
+                <i class="fa-solid fa-microphone"></i>
+            </button>
+            <input type="text" id="message-input" placeholder="Type a message...">
+            <button id="send-button" title="Send Message">
+                <i class="fa-solid fa-paper-plane"></i>
+            </button>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- DOM Element References ---
+            const messageList = document.getElementById('message-list');
+            const messageInput = document.getElementById('message-input');
+            const sendButton = document.getElementById('send-button');
+            const micButton = document.getElementById('mic-button');
+
+            // --- Backend Configuration ---
+            const crmWebhookUrl = 'https://ffe0f01dd6ce.ngrok-free.app/app';
+
+            // --- State Management ---
+            let isListening = false;
+            
+            // --- Speech Recognition Setup ---
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            let recognition;
+
+            if (SpeechRecognition) {
+                recognition = new SpeechRecognition();
+                recognition.continuous = false; // Stop after a pause
+                recognition.lang = 'en-US';
+                recognition.interimResults = false; // We only want the final result
+                recognition.maxAlternatives = 1;
+
+                recognition.onstart = () => {
+                    isListening = true;
+                    micButton.classList.add('listening');
+                    messageInput.placeholder = 'Listening...';
+                };
+
+                recognition.onresult = (event) => {
+                    const speechResult = event.results[0][0].transcript;
+                    messageInput.value = speechResult;
+                };
+                
+                recognition.onspeechend = () => {
+                    recognition.stop();
+                };
+
+                recognition.onend = () => {
+                    isListening = false;
+                    micButton.classList.remove('listening');
+                    messageInput.placeholder = 'Type a message...';
+                    // Automatically send the message after speech recognition is done
+                    if (messageInput.value.trim()) {
+                        handleSendMessage();
+                    }
+                };
+
+                recognition.onerror = (event) => {
+                    console.error('Speech recognition error:', event.error);
+                    addMessageToUI(`Speech error: ${event.error}`, 'bot');
+                    isListening = false;
+                    micButton.classList.remove('listening');
+                    messageInput.placeholder = 'Type a message...';
+                };
+            } else {
+                // If the browser doesn't support Speech Recognition, disable the button
+                micButton.disabled = true;
+                micButton.title = "Speech recognition not supported in your browser";
+                micButton.style.opacity = 0.5;
+                micButton.style.cursor = 'not-allowed';
+            }
+
+
+            // --- Core Functions ---
+
+            /**
+             * Adds a message bubble to the chat UI.
+             * @param {string} text - The message text.
+             * @param {('user'|'bot')} sender - Who sent the message.
+             */
+            const addMessageToUI = (text, sender) => {
+                const messageDiv = document.createElement('div');
+                messageDiv.classList.add('message', `${sender}-message`);
+
+                const textP = document.createElement('p');
+                textP.classList.add('text');
+                textP.textContent = text;
+                
+                const time = new Date();
+                const timestampSpan = document.createElement('span');
+                timestampSpan.classList.add('timestamp');
+                timestampSpan.textContent = `${time.getHours()}:${time.getMinutes().toString().padStart(2, '0')}`;
+                
+                messageDiv.appendChild(textP);
+                messageDiv.appendChild(timestampSpan);
+                messageList.appendChild(messageDiv);
+
+                // Auto-scroll to the latest message
+                messageList.scrollTop = messageList.scrollHeight;
+            };
+            
+            /**
+             * Sends the user's message to the CRM backend.
+             * @param {string} messageText - The text to send.
+             */
+            const sendToCRMBackend = async (messageText) => {
+                const payload = {
+                    "message": messageText,
+                    "user_phone": "917024316744", // Hardcoded as in the Flutter app
+                };
+
+                try {
+                    const response = await fetch(crmWebhookUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    const botReply = data.reply || 'Sorry, I did not get a valid response.';
+                    addMessageToUI(botReply, 'bot');
+
+                } catch (error) {
+                    console.error('Error sending message to backend:', error);
+                    addMessageToUI('Connection error. Please check the backend and your network.', 'bot');
+                }
+            };
+
+            /**
+             * Handles sending a message, either from input or speech.
+             */
+            const handleSendMessage = () => {
+                const text = messageInput.value.trim();
+                if (text) {
+                    addMessageToUI(text, 'user');
+                    sendToCRMBackend(text);
+                    messageInput.value = '';
+                }
+            };
+            
+            /**
+             * Toggles the microphone listening state.
+             */
+            const toggleListening = () => {
+                if (!SpeechRecognition) return;
+
+                if (isListening) {
+                    recognition.stop();
+                } else {
+                    recognition.start();
+                }
+            };
+
+            // --- Event Listeners ---
+            sendButton.addEventListener('click', handleSendMessage);
+            micButton.addEventListener('click', toggleListening);
+            
+            messageInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault(); // Prevents new line in input
+                    handleSendMessage();
+                }
+            });
+
+            // --- Initial Bot Message ---
+            addMessageToUI('Hello! How can I help you today?', 'bot');
+        });
+    </script>
+</body>
+</html>

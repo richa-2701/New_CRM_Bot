@@ -24,6 +24,7 @@ class User(Base):
     username = Column(String(100), nullable=False)
     usernumber = Column(String(15), unique=True, nullable=False)
     department = Column(String(100), nullable=True)
+    password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     leads = relationship("Lead", back_populates="assigned_to_user")
     reminders = relationship("Reminder", back_populates="user")

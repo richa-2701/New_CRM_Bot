@@ -3,10 +3,36 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app import models, schemas
 from app.models import User
-# :mag: Get user by number (usernumber)
+
+def create_user(db: Session, user: schemas.UserCreate):
+    db_user = models.User(
+        username=user.username,
+        usernumber=user.usernumber,
+        email=user.email,
+        department=user.department,
+        password=user.password  
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+def get_user_by_username(db: Session, username: str):
+    return db.query(models.User).filter(models.User.username == username).first()
+
+
 def get_user_by_phone(db: Session, phone: str):
     return db.query(User).filter(User.usernumber == phone.strip()).first()
 # :mag: Get user by name (username - case-insensitive)
+
+def verify_user(db: Session, username: str, password: str):
+    user = get_user_by_username(db, username)
+    if user and user.password == password:
+        return user
+    return None
+
+
 def get_user_by_name(db: Session, name):
     if not isinstance(name, str):
         return None

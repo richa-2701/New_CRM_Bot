@@ -3,7 +3,7 @@ import logging
 import re
 from sqlalchemy.orm import Session
 from app.crud import get_lead_by_company, get_user_by_phone, get_user_by_name
-from app.message_sender import send_whatsapp_message, format_phone
+from app.message_sender import send_message, format_phone
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def parse_reassignment_message(msg_text: str) -> tuple[str | None, str | None]:
 
     return None, None
 
-async def handle_reassignment(db: Session, message_text: str, sender: str, reply_url: str):
+async def handle_reassignment(db: Session, message_text: str, sender: str, reply_url: str,source: str = "whatsapp"):
     """
     Reassigns a lead to a different user.
 
@@ -43,13 +43,17 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
         company_name, new_assignee_input = parse_reassignment_message(message_text)
 
         if not company_name or not new_assignee_input:
-            send_whatsapp_message(reply_url, sender, "⚠️ Please specify both Company and new Assignee.")
+            response = send_message(reply_url, sender, "⚠️ Please specify both Company and new Assignee.")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": "Missing company or assignee"}
 
         # ✅ Find the lead
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ No lead found with company: {company_name}")
+            response = send_message(reply_url, sender, f"❌ No lead found with company: {company_name}")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": "Lead not found"}
 
         # ✅ Find the user by number or name
@@ -60,7 +64,9 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
             assignee = get_user_by_name(db, new_assignee_input)
 
         if not assignee:
-            send_whatsapp_message(reply_url, sender, f"❌ Couldn't find user: {new_assignee_input}")
+            response = send_message(reply_url, sender, f"❌ Couldn't find user: {new_assignee_input}")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": "Assignee not found"}
 
         # ✅ Reassign in DB
@@ -68,7 +74,9 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
         db.commit()
 
         # ✅ Notify sender
-        send_whatsapp_message(reply_url, sender, f"✅ Lead '{company_name}' reassigned to {assignee.username}")
+        response = send_message(reply_url, sender, f"✅ Lead '{company_name}' reassigned to {assignee.username}")
+        if source.lower() == "app":
+            return response
 
         # ✅ Notify assignee with full lead details
         if assignee.usernumber:
@@ -82,11 +90,15 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
                 f"📊 Status: {lead.status or 'N/A'}\n"
                 f"🔄 Assigned By: {sender}\n"
             )
-            send_whatsapp_message(reply_url, phone_formatted, message)
+            response = send_message(reply_url, phone_formatted, message)
+            if source.lower() == "app":
+                return response
 
         return {"status": "success", "message": f"Lead '{company_name}' reassigned to {assignee.username}"}
 
     except Exception as e:
         logger.error("❌ Error in handle_reassignment: %s", str(e), exc_info=True)
-        send_whatsapp_message(reply_url, sender, "❌ Failed to reassign lead.")
+        response = send_message(reply_url, sender, "❌ Failed to reassign lead.")
+        if source.lower() == "app":
+            return response
         return {"status": "error", "detail": str(e)}

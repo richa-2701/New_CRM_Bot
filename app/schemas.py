@@ -1,3 +1,4 @@
+# app/schemas.py
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, Union
 from datetime import datetime
@@ -27,6 +28,23 @@ class LeadUpdate(BaseModel):
     status: Optional[str]
     remark: Optional[str] = None
     assigned_to: Optional[int]
+
+class LeadResponse(BaseModel):
+    id: int
+    company_name: str
+    contact_name: Optional[str]
+    phone: Optional[str]
+    email: Optional[str]
+    address: Optional[str]
+    source: Optional[str]
+    segment: Optional[str]
+    team_size: Optional[str]
+    remark: Optional[str]
+    status: Optional[str]
+    assigned_to: str
+    created_by: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 # ---------------- TASK SCHEMAS ----------------
 class TaskBase(BaseModel):
     lead_id: int
@@ -45,8 +63,26 @@ class UserBase(BaseModel):
     username: str
     usernumber: str
     department: Optional[str] = None
-class UserCreate(UserBase):
-    pass
+class UserCreate(BaseModel):
+    username: str
+    usernumber: str
+    email: Optional[str] = None
+    department: Optional[str] = None
+    password: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    usernumber: str
+    department: Optional[str]
+
+    class Config:
+        orm_mode = True
+
 class UserOut(UserBase):
     id: int
     created_at: datetime
@@ -77,6 +113,8 @@ class FeedbackOut(FeedbackBase):
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 # ---------------- REMINDER SCHEMAS ----------------
+
+
 class ReminderBase(BaseModel):
     lead_id: int
     remind_time: datetime

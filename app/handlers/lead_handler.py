@@ -7,7 +7,7 @@ from app.crud import (
     get_lead_by_company,
     create_lead,
 )
-from app.message_sender import send_whatsapp_message, format_phone
+from app.message_sender import send_whatsapp_message, send_message, format_phone
 from app.schemas import LeadCreate
 from app.gpt_parser import parse_lead_info, parse_update_fields
 from app.temp_store import temp_store
@@ -15,12 +15,14 @@ from app.temp_store import temp_store
 logger = logging.getLogger(__name__)
 
 # --- CORRECTED LINE: Changed 'def' to 'async def' ---
-async def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: str):
+async def handle_new_lead(db: Session, message_text: str, created_by: str, reply_url: str, source: str = "whatsapp"):
     try:
         parsed_data, polite_message = parse_lead_info(message_text)
 
         if isinstance(parsed_data, dict) and parsed_data.get("missing_fields"):
-            send_whatsapp_message(reply_url, created_by, polite_message)
+            response = send_message(reply_url, created_by, polite_message, source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": polite_message}
 
         logger.info("🎯 Handling new lead with parsed data: %s", parsed_data)
@@ -33,12 +35,16 @@ async def handle_new_lead(db: Session, message_text: str, created_by: str, reply
                 "🙏 Please provide these required fields to create the lead:\n"
                 "🏢 Company Name\n👤 Contact Person\n📞 Phone\n📲 Source\n👨‍💼 Assigned To (phone or name)"
             )
-            send_whatsapp_message(reply_url, created_by, polite_msg)
+            response = send_message(reply_url, created_by, polite_msg, source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": f"Missing field(s): {', '.join(missing_fields)}"}
 
         existing = get_lead_by_company(db, parsed_data["company_name"])
         if existing:
-            send_whatsapp_message(reply_url, created_by, f"⚠️ Lead for '{parsed_data['company_name']}' already exists.")
+            response = send_message(reply_url, created_by, f"⚠️ Lead for '{parsed_data['company_name']}' already exists.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": "Lead already exists"}
 
         assigned_to_input = parsed_data.get("assigned_to")
@@ -52,7 +58,9 @@ async def handle_new_lead(db: Session, message_text: str, created_by: str, reply
                 assigned_user = get_user_by_name(db, assigned_to_cleaned)
 
         if not assigned_user:
-            send_whatsapp_message(reply_url, created_by, f"❌ Couldn't find team member '{assigned_to_input}' in the system.")
+            response = send_message(reply_url, created_by, f"❌ Couldn't find team member '{assigned_to_input}' in the system.", source)
+            if source.lower() == "app":
+                return response
             return {"status": "error", "detail": f"User '{assigned_to_input}' not found"}
 
         assigned_to = assigned_user.username
@@ -75,23 +83,30 @@ async def handle_new_lead(db: Session, message_text: str, created_by: str, reply
 
         created = create_lead(db, lead_data, created_by, assigned_to)
 
-        send_whatsapp_message(reply_url, created_by, f"✅ New lead created: {created.company_name}")
-
-        if assigned_user.usernumber:
+        creator_response = send_message(reply_url, created_by, f"✅ New lead created: {created.company_name}", source)
+        
+        # 📢 Notify assignee (only for WhatsApp, not for app)
+        if assigned_user.usernumber and source.lower() != "app":
             send_whatsapp_message(
                 reply_url,
                 format_phone(assigned_user.usernumber),
                 f"📢 You have been assigned a new lead:\n🏢 {created.company_name}\n👤 {created.contact_name}, 📞 {created.phone}"
             )
 
+        # Return app response if source is app
+        if source.lower() == "app":
+            return creator_response
+        
         return {"status": "success", "lead_id": created.id}
 
     except Exception as e:
         logger.error("❌ Error in handle_new_lead: %s", str(e), exc_info=True)
-        send_whatsapp_message(reply_url, created_by, "❌ An error occurred while creating the lead")
+        response = send_message(reply_url, created_by, "❌ An error occurred while creating the lead", source)
+        if source.lower() == "app":
+            return response
         return {"status": "error", "detail": str(e)}
 
-async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str = None):
+async def handle_update_lead(db: Session, message_text: str, sender: str, reply_url: str, company_name: str = None, source: str = "whatsapp"):
     
 
     try:
@@ -100,12 +115,16 @@ async def handle_update_lead(db: Session, message_text: str, sender: str, reply_
         # Use company_name from context or memory
         company_name = company_name or update_fields.get("company_name") or temp_store.get(sender)
         if not company_name:
-            send_whatsapp_message(reply_url, sender, "⚠️ Please mention the company name.")
+            response = send_message(reply_url, sender, "⚠️ Please mention the company name.")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "Missing company name."}
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            send_whatsapp_message(reply_url, sender, f"❌ No lead found for {company_name}")
+            response = send_message(reply_url, sender, f"❌ No lead found for {company_name}")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": f"Lead not found for {company_name}"}
 
         # Update matching fields
@@ -116,7 +135,9 @@ async def handle_update_lead(db: Session, message_text: str, sender: str, reply_
                 updated_fields.append(field)
 
         if not updated_fields:
-            send_whatsapp_message(reply_url, sender, "⚠️ No valid fields found to update.")
+            response = send_message(reply_url, sender, "⚠️ No valid fields found to update.")
+            if source.lower() == "app":
+                return response
             return {"status": "error", "message": "No valid fields to update"}
 
         db.commit()
@@ -124,12 +145,16 @@ async def handle_update_lead(db: Session, message_text: str, sender: str, reply_
         # Remember company for future messages
         temp_store.set(sender, company_name)
 
-        send_whatsapp_message(reply_url, sender, f"✅ Lead for '{company_name}' updated: {', '.join(updated_fields)}, Now schedule Demo for '{company_name}'")
+        response = send_message(reply_url, sender, f"✅ Lead for '{company_name}' updated: {', '.join(updated_fields)}, Now schedule Demo for '{company_name}'")
+        if source.lower() == "app":
+                return response
         return {"status": "success", "message": "Lead updated successfully"}
 
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
         logger.error("Error updating lead: %s", str(e), exc_info=True)
-        send_whatsapp_message(reply_url, sender, "❌ Something went wrong during update.")
+        response = send_message(reply_url, sender, "❌ Something went wrong during update.")
+        if source.lower() == "app":
+                return response
         return {"status": "error", "detail": str(e)}

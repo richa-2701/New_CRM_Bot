@@ -1,4 +1,3 @@
-# app/message_sender.py
 import os
 import requests
 import time
@@ -7,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MAYT_API_URL = os.getenv("MAYT_API_URL")
-MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "1fec7901-7cf7-4bf7-82d9-753299c45ce3")  # fallback if .env missing
+MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "eabf6096-5968-4b07-a74a-d10e34ffd97e")  # fallback if .env missing
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 
@@ -17,7 +16,29 @@ def format_phone(phone: str) -> str:
         return "91" + phone
     return phone
 
-def send_whatsapp_message(reply_url: str, number: str, message: str) -> bool:
+def app_reply_json(message: str, source: str) -> dict:
+    """Returns JSON response for app-based messages"""
+    if source.strip().lower() == "app":
+        print("✅ Using app-specific message sending logic")
+        data = {"status": "success", "reply": message}
+        return data
+    return {"status": "error", "reply": "Invalid source for app response"}
+
+def send_message(reply_url: str, number: str, message: str, source: str = "whatsapp") -> dict:
+    """
+    Unified message sending function that handles both WhatsApp and app sources
+    Returns dict for both app and WhatsApp for consistency
+    """
+    if source.strip().lower() == "app":
+        return app_reply_json(message, source)
+    else:
+        # WhatsApp logic
+        success = send_whatsapp_message(reply_url, number, message)
+        return {"status": "success" if success else "error", "sent": success, "reply": message if success else "Failed to send message"}
+ 
+
+
+def send_whatsapp_message(reply_url: str, number: str, message: str,) -> bool:
     number = format_phone(number)
     print(f"📤 Sending WhatsApp message to {number}: {message}  TOKEN={MAYT_API_TOKEN}")
 

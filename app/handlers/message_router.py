@@ -4,7 +4,7 @@ import logging
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.gpt_parser import parse_intent_and_fields, parse_lead_info
-from app.message_sender import send_whatsapp_message
+from app.message_sender import send_whatsapp_message,send_message
 from app.crud import update_lead_status, get_user_by_name
 from app.handlers import (
     lead_handler,
@@ -21,7 +21,20 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-async def route_message(sender: str, message_text: str, reply_url: str):
+def extract_company_name(text: str) -> str:
+    patterns = [
+        r"(?:for|with|of)\s+([A-Za-z0-9\s&.'-]+?)(?=\s+on|\s+at|\s+to|\s+next|\s+is|$|,)"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            company = match.group(1).strip()
+            if company.lower() in ["the", "a", "an"]:
+                continue
+            return company
+    return ""
+
+async def route_message(sender: str, message_text: str, reply_url: str,source: str = "whatsapp")-> dict:
     db: Session = SessionLocal()
     lowered_text = message_text.lower().strip()
 
@@ -78,9 +91,13 @@ async def route_message(sender: str, message_text: str, reply_url: str):
                 "'There is a lead from ABC Pvt Ltd, contact is Ramesh (9876543210), Source Referral, interested in inventory software, assign to Banwari.'\n"
                 "✅ Format 2: Comma-Separated \n ABC Pvt Ltd, Ramesh, 9876543210, Jaipur, Inventory Software, Banwari"
             )
-            send_whatsapp_message(reply_url, sender, polite_msg)
+            response = send_message(reply_url, sender, polite_msg, source)
+            if source.lower() == "app":
+                return response
             return {"status": "prompted_for_lead"}
+        
 
+        
         if intent == "new_lead":
             return await lead_handler.handle_new_lead(
                 db=db,
@@ -120,7 +137,27 @@ async def route_message(sender: str, message_text: str, reply_url: str):
 
         elif intent == "reassign_task":
             return await reassignment_handler.handle_reassignment(db, message_text, sender, reply_url)
-            
+
+        elif "not interested" in lowered_text:
+            company = extract_company_name(message_text)
+            remark_match = re.search(r"(?:because|reason|remark)\s+(.*)", message_text, re.IGNORECASE)
+            remark = remark_match.group(1).strip() if remark_match else "Not interested after initial contact."
+            update_lead_status(db, company, "Unqualified", remark=remark)
+            response = send_message(reply_url, sender, f"✅ Marked '{company}' as Unqualified. Remark: '{remark}'.", source)
+            if source.lower() == "app":
+                return response
+            return {"status": "success"}
+
+        elif "not in our segment" in lowered_text:
+            company = extract_company_name(message_text)
+            update_lead_status(db, company, "Not Our Segment")
+            response = send_message(reply_url, sender, f"📂 Marked '{company}' as 'Not Our Segment'.", source)
+            if source.lower() == "app":
+                return response
+            return {"status": "success"}
+
+
+        
         else:
             # Fallback message is now more accurate since conversational replies are handled
             # before this point.
@@ -130,7 +167,9 @@ async def route_message(sender: str, message_text: str, reply_url: str):
                 "➡️ 'Lead is qualified for ...'\n"
                 "➡️ 'Schedule meeting with ...'"
             )
-            send_whatsapp_message(reply_url, sender, fallback)
+            response = send_message(reply_url, sender, fallback, source)
+            if source.lower() == "app":
+                return response
             return {"status": "unhandled"}
 
     except Exception as e:
@@ -138,7 +177,9 @@ async def route_message(sender: str, message_text: str, reply_url: str):
         # On a critical failure, clear the user's context to prevent them from being stuck.
         if sender in pending_context:
             pending_context.pop(sender, None)
-        send_whatsapp_message(reply_url, sender, "❌ Internal error occurred.")
+        response = send_message(reply_url, sender, "❌ Internal error occurred.", source)
+        if source.lower() == "app":
+            return response
         return {"status": "error", "detail": str(e)}
 
     finally:
