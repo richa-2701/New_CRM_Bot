@@ -15,6 +15,13 @@ class LeadBase(BaseModel):
     segment: Optional[str] = None
     remark: Optional[str] = None
     product: Optional[str] = None  # optional for future use
+    phone_2: Optional[str] = None
+    turnover: Optional[str] = None
+    current_system: Optional[str] = None
+    machine_specification: Optional[str] = None
+    challenges: Optional[str] = None
+    # --- END NEW FIELDS ---
+
 class LeadCreate(LeadBase):
     created_by: str
     assigned_to: Optional[str]  # FK to users.id
@@ -45,6 +52,15 @@ class LeadResponse(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime] = None
+    
+    # --- NEW OPTIONAL FIELDS ---
+    phone_2: Optional[str] = None
+    turnover: Optional[str] = None
+    current_system: Optional[str] = None
+    machine_specification: Optional[str] = None
+    challenges: Optional[str] = None
+    # --- END NEW FIELDS ---
+
 # ---------------- TASK SCHEMAS ----------------
 class TaskBase(BaseModel):
     lead_id: int
@@ -132,5 +148,19 @@ class ReminderCreate(ReminderBase):
 class ReminderOut(ReminderBase):
     id: int
     status: str
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+    
+# ---------------- ACTIVITY LOG SCHEMAS ----------------
+class ActivityLogBase(BaseModel):
+    lead_id: int
+    details: str
+
+class ActivityLogCreate(ActivityLogBase):
+    phase: str
+
+class ActivityLogOut(ActivityLogBase):
+    id: int
+    phase: str
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)

@@ -47,6 +47,15 @@ class Lead(Base):
     status = Column(String, default="new")
     created_by = Column(String)
     assigned_to = Column(String, ForeignKey("users.username"))
+    
+    # --- NEW OPTIONAL FIELDS ---
+    phone_2 = Column(String, nullable=True)
+    turnover = Column(String, nullable=True)
+    current_system = Column(String, nullable=True)
+    machine_specification = Column(Text, nullable=True)
+    challenges = Column(Text, nullable=True)
+    # --- END NEW FIELDS ---
+    
     created_at = Column(DateTime, default=datetime.utcnow)
     assigned_to_user = relationship("User", back_populates="leads")
     meetings = relationship("Meeting", back_populates="lead")
@@ -55,9 +64,20 @@ class Lead(Base):
     feedbacks = relationship("Feedback", back_populates="lead")
     task_history = relationship("TaskHistory", back_populates="lead")
     assignment_logs = relationship("AssignmentLog", back_populates="lead")
-    status_logs = relationship("StatusLog", back_populates="lead")
     events = relationship("Event", back_populates="lead")
     tasks = relationship("Task", back_populates="lead")
+    activities = relationship("ActivityLog", back_populates="lead")
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    phase = Column(String, nullable=False)
+    details = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    lead = relationship("Lead", back_populates="activities")
 
 
 class Task(Base):
@@ -69,6 +89,7 @@ class Task(Base):
     assigned_to = Column(String)
     remark = Column(String)
     status = Column(String, default="pending")
+    # --- CORRECTED RELATIONSHIP: Changed "Task" to "Lead" ---
     lead = relationship("Lead", back_populates="tasks")
 
 
@@ -153,13 +174,3 @@ class AssignmentLog(Base):
     assigned_by = Column(String)
     assigned_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="assignment_logs")
-
-
-class StatusLog(Base):
-    __tablename__ = "status_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    lead_id = Column(Integer, ForeignKey("leads.id"))
-    status = Column(String)
-    updated_by = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    lead = relationship("Lead", back_populates="status_logs")

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MAYT_API_URL = os.getenv("MAYT_API_URL")
-MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "eabf6096-5968-4b07-a74a-d10e34ffd97e")  # fallback if .env missing
+MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "b0cc6733-9abc-4a60-a33d-4f56fea82125")  # fallback if .env missing
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 

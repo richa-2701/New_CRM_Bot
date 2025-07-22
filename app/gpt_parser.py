@@ -52,6 +52,11 @@ Optional Fields:
 - "segment"
 - "remark"
 - "product"
+- "phone_2"
+- "turnover"
+- "current_system"
+- "machine_specification"
+- "challenges"
 
 Return only JSON. Do not add explanations.
 
@@ -98,11 +103,6 @@ User Message:
         if not data.get("source"):
             data["source"] = "whatsapp"
 
-        # --- REMOVED THIS LINE ---
-        # The logic below will correctly check if assigned_to is missing.
-        # if not data.get("assigned_to"):
-        #     data["assigned_to"] = "8878433436"
-
         required = ["company_name", "contact_name", "phone", "source", "assigned_to"]
         missing_final = [f for f in required if not data.get(f)]
         if missing_final:
@@ -121,25 +121,26 @@ User Message:
 def parse_update_fields(message: str):
     """
     Uses GPT to extract only optional lead fields from a message for updating an existing lead.
-    Does NOT require company_name or other required fields.
     """
     prompt = f"""
 You are an expert CRM assistant. Extract ONLY the following optional fields from the user's message for updating an existing lead.
 
-Optional Fields:
+Optional Fields to extract:
 - "email"
 - "address"
 - "team_size"
 - "segment"
 - "remark"
+- "phone_2"
+- "turnover"
+- "current_system"
+- "machine_specification"
+- "challenges"
 
 The message may be comma-separated or natural language. 
-👉 If the message is comma-separated, do NOT assume the order. Detect each field by its value and context (e.g., phone numbers, emails, names, addresses, remarks, etc).
-
-Do NOT return required fields like company_name, contact_name, phone, or source.
-If a field is not present, set its value to null.
+Do NOT return core fields like company_name, contact_name, or phone.
+If a field is not present, omit it from the JSON.
 Return only JSON. Do not add explanations.
-
 
 User Message:
 \"{message}\"
@@ -170,7 +171,7 @@ User Message:
             return {}, f"❌ GPT API failed: {response.status_code}"
 
         result_content = response.json()["choices"][0]["message"]["content"]
-        logger.info(f"🔍 Raw GPT Response: {result_content}")
+        logger.info(f"🔍 Raw GPT Response for optional fields: {result_content}")
 
         try:
             data = json.loads(result_content)
@@ -178,9 +179,11 @@ User Message:
             logger.error("❌ GPT returned invalid JSON")
             return {}, "❌ GPT returned invalid JSON"
 
-        # Only keep optional fields
-        optional = ["email", "address", "team_size", "segment", "remark"]
-        update_data = {k: v for k, v in data.items() if k in optional}
+        optional = [
+            "email", "address", "team_size", "segment", "remark", "phone_2", 
+            "turnover", "current_system", "machine_specification", "challenges"
+        ]
+        update_data = {k: v for k, v in data.items() if k in optional and v}
 
         return update_data, "✅ Lead update fields parsed successfully."
 
@@ -191,6 +194,70 @@ User Message:
         logger.error(f"❌ GPT processing error: {e}")
         return {}, "❌ An unexpected error occurred."
 
+
+# --- NEW PARSER FUNCTION ---
+def parse_core_lead_update(message: str):
+    """
+    Uses GPT to extract core lead fields for an update, such as company_name.
+    """
+    prompt = f"""
+You are an expert CRM assistant. The user wants to update core details of an existing lead.
+Extract any of the following fields if they are present in the message.
+
+Fields to extract for update:
+- "company_name"
+- "contact_name"
+- "phone"
+- "email"
+- "address"
+- "phone_2"
+
+The user might provide the information in key-value pairs or natural language.
+For example: "The company name is now XYZ Corp, contact person is now Sunita."
+Another example: "company: XYZ Corp, phone: 9988776655"
+
+If a field is not mentioned, omit it from the JSON output.
+Return only JSON. Do not add explanations.
+
+User Message:
+\"{message}\"
+"""
+
+    headers = {
+        "Authorization": f"Bearer {GPT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "response_format": {"type": "json_object"}
+    }
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+        if response.status_code != 200:
+            logger.error("❌ GPT API error (%s): %s", response.status_code, response.text)
+            return {}, f"❌ GPT API failed: {response.status_code}"
+        
+        result_content = response.json()["choices"][0]["message"]["content"]
+        logger.info(f"🔍 Raw GPT Response for core update: {result_content}")
+        
+        data = json.loads(result_content)
+        
+        # Filter to ensure only valid fields are returned
+        core_fields = ["company_name", "contact_name", "phone", "email", "address", "phone_2"]
+        update_data = {k: v for k, v in data.items() if k in core_fields and v}
+        
+        return update_data, "✅ Core lead update fields parsed."
+
+    except Exception as e:
+        logger.error(f"❌ GPT core update processing error: {e}", exc_info=True)
+        return {}, "❌ An unexpected error occurred during core update parsing."
 
 
 def parse_update_company(message: str) -> str:
@@ -224,6 +291,10 @@ def parse_intent_and_fields(message: str):
     """
     lowered = message.lower()
 
+    if re.search(r"meeting (is )?done", lowered):
+        # Make "meeting done" more specific to avoid conflict with feedback
+        return "meeting_done", {}
+
     if re.search(r"lead\s+is\s+qualified|qualified\s+for|is\s+qualified|lead qualified", lowered):
         return "qualify_lead", {}
 
@@ -232,7 +303,7 @@ def parse_intent_and_fields(message: str):
     if re.search(r"schedule.+meeting|meeting.+schedule", lowered): return "schedule_meeting", {}
     if re.search(r"reassign", lowered): return "reassign_task", {}
     if re.search(r"remind me|set reminder", lowered): return "reminder", {}
-    if re.search(r"feedback for", lowered) or re.search(r"meeting done", lowered): return "feedback", {}
+    if re.search(r"feedback for", lowered): return "feedback", {}
 
     if re.search(r"new lead|there is a lead|add lead", lowered) or ("lead" in lowered and "tell" in lowered):
         return "new_lead", {}

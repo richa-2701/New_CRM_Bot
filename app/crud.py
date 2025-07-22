@@ -1,8 +1,9 @@
+# app/crud.py
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app import models, schemas
-from app.models import User,Event
+from app.models import User, Event, ActivityLog
 
 def create_user(db: Session, user: schemas.UserCreate):
     db_user = models.User(
@@ -80,13 +81,24 @@ def save_lead(
         remark=lead.remark,
         created_by=created_by,
         assigned_to=assigned_user.username,
+        phone_2=lead.phone_2,
+        turnover=lead.turnover,
+        current_system=lead.current_system,
+        machine_specification=lead.machine_specification,
+        challenges=lead.challenges,
         created_at=datetime.utcnow()
     )
     db.add(db_lead)
     db.commit()
     db.refresh(db_lead)
+
+    # --- AUTOMATIC ACTIVITY LOGGING on Lead Creation ---
+    activity_details = f"Lead created by {created_by} and assigned to {assigned_user.username}."
+    create_activity_log(db, activity=schemas.ActivityLogCreate(lead_id=db_lead.id, phase="New Lead", details=activity_details))
+
     return db_lead
-# :arrows_counterclockwise: Update lead status and add status log
+
+# :arrows_counterclockwise: Update lead status and add activity log
 def update_lead_status(
     db: Session,
     lead_id: int,
@@ -96,19 +108,28 @@ def update_lead_status(
 ):
     lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
     if lead:
+        old_status = lead.status
         lead.status = status
+        
+        # Add to main remark if provided
         if remark:
-            lead.remark = remark
-        db_status = models.StatusLog(
-            lead_id=lead_id,
-            status=status,
-            updated_by=updated_by,
-            created_at=datetime.utcnow()
-        )
-        db.add(db_status)
+            if lead.remark:
+                lead.remark += f"\n--\nStatus Update: {remark}"
+            else:
+                lead.remark = f"Status Update: {remark}"
+                
+        # --- REMOVED StatusLog CREATION ---
+        
+        # --- AUTOMATIC ACTIVITY LOGGING on Status Change ---
+        activity_details = f"Status changed from '{old_status}' to '{status}' by {updated_by}."
+        if remark:
+            activity_details += f" Remark: {remark}"
+        create_activity_log(db, activity=schemas.ActivityLogCreate(lead_id=lead.id, phase=status, details=activity_details))
+        
         db.commit()
         db.refresh(lead)
     return lead
+
 # :date: Create a new event (Meeting or Demo)
 def create_event(db: Session, event: schemas.EventCreate):
     db_event = models.Event(
@@ -126,3 +147,15 @@ def create_event(db: Session, event: schemas.EventCreate):
     return db_event
 # :pushpin: Alias
 create_lead = save_lead
+
+# --- CRUD FUNCTION FOR ACTIVITY LOG ---
+def create_activity_log(db: Session, activity: schemas.ActivityLogCreate):
+    db_activity = models.ActivityLog(
+        lead_id=activity.lead_id,
+        phase=activity.phase,
+        details=activity.details
+    )
+    db.add(db_activity)
+    db.commit()
+    db.refresh(db_activity)
+    return db_activity
