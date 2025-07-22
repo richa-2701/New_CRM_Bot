@@ -2,7 +2,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app import models, schemas
-from app.models import User
+from app.models import User,Event
 
 def create_user(db: Session, user: schemas.UserCreate):
     db_user = models.User(
@@ -44,6 +44,9 @@ def get_lead_by_company(db: Session, company_name: str):
         func.lower(models.Lead.company_name).like(f"%{company_name.strip().lower()}%")
     ).first()
 
+
+def get_tasks_by_username(db: Session, username: str):
+    return db.query(Event).filter(Event.assigned_to == username).order_by(Event.event_time).all()
 
 # :floppy_disk: Create a new lead - checks assigned_to by name or number
 def save_lead(

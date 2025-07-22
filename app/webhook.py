@@ -2,11 +2,11 @@ from fastapi import APIRouter, Request, Response, status,HTTPException,Depends
 from app.handlers.message_router import route_message
 import logging
 from app.models import Lead
-from app.schemas import LeadResponse, UserCreate, UserLogin, UserResponse
+from app.schemas import LeadResponse, UserCreate, UserLogin, UserResponse, TaskOut
 from app.crud import create_user, verify_user
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.crud import get_user_by_username
+from app.crud import get_user_by_username,get_tasks_by_username
 
 
 # Configure logging
@@ -37,6 +37,13 @@ async def get_leads_by_user_id(user_id: str, db: Session = Depends(get_db)):
     if not leads:
         raise HTTPException(status_code=404, detail="No leads found for this user")
     return leads
+
+@router.get("/tasks/{username}", response_model=list[TaskOut])
+def get_user_tasks(username: str, db: Session = Depends(get_db)):
+    tasks = get_tasks_by_username(db, username)
+    if not tasks:
+        raise HTTPException(status_code=404, detail="No tasks found for this user")
+    return tasks
 
 @router.get("/webhook", tags=["Webhook"])
 async def webhook_verification(request: Request):

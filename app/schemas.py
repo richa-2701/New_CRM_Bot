@@ -54,10 +54,16 @@ class TaskBase(BaseModel):
     remark: Optional[str] = None
 class TaskCreate(TaskBase):
     pass
-class TaskOut(TaskBase):
+
+class TaskOut(BaseModel):
     id: int
-    status: str
-    model_config = ConfigDict(from_attributes=True)
+    lead_id: int
+    event_type: str
+    event_time: datetime
+    remark: str | None = None
+
+    class Config:
+        orm_mode = True
 # ---------------- USER SCHEMAS ----------------
 class UserBase(BaseModel):
     username: str
@@ -78,6 +84,7 @@ class UserResponse(BaseModel):
     id: int
     username: str
     usernumber: str
+    email: Optional[str] = None 
     department: Optional[str]
 
     class Config:

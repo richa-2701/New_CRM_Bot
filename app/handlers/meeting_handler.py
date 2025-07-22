@@ -168,7 +168,7 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
     return {"status": "success", "message": "Meeting marked done"}
 
 # --- NEW HANDLER FUNCTION ---
-async def handle_meeting_details_update(db: Session, msg_text: str, sender: str, reply_url: str, source):
+async def handle_meeting_details_update(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
     """Handles the user's reply after 'meeting done' to update missing details."""
     context = pending_context.get(sender)
     if not context or context.get("intent") != "awaiting_meeting_details":
@@ -188,7 +188,7 @@ async def handle_meeting_details_update(db: Session, msg_text: str, sender: str,
             return response
         return {"status": "error", "message": "Lead not found"}
         
-    update_fields = parse_update_fields(msg_text)
+    update_fields, _ = parse_update_fields(msg_text)
     
     # INTELLIGENT PARSING: If no key-value fields are found, treat the whole message as a remark.
     if not update_fields:
@@ -198,7 +198,6 @@ async def handle_meeting_details_update(db: Session, msg_text: str, sender: str,
     updated_fields_list = []
     for field, value in update_fields.items():
         if hasattr(lead, field) and value:
-            # Special handling for remark to append instead of overwrite
             if field == 'remark' and lead.remark and lead.remark != 'No remark provided.':
                 setattr(lead, field, f"{lead.remark}\n--\n{value}")
             else:

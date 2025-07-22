@@ -23,6 +23,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     username = Column(String(100), nullable=False)
     usernumber = Column(String(15), unique=True, nullable=False)
+    email = Column(String(100), nullable=True)
     department = Column(String(100), nullable=True)
     password = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

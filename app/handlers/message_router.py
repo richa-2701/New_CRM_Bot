@@ -67,6 +67,7 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
                     msg_text=message_text,
                     sender=sender,
                     reply_url=reply_url,
+                    source=source
                 )
             # --- END NEW ROUTING LOGIC ---
 

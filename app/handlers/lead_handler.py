@@ -110,7 +110,7 @@ async def handle_update_lead(db: Session, message_text: str, sender: str, reply_
     
 
     try:
-        update_fields = parse_update_fields(message_text)
+        update_fields,_ = parse_update_fields(message_text)
 
         # Use company_name from context or memory
         company_name = company_name or update_fields.get("company_name") or temp_store.get(sender)
