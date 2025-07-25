@@ -74,6 +74,7 @@ class TaskCreate(TaskBase):
 class TaskOut(BaseModel):
     id: int
     lead_id: int
+    company_name: str
     event_type: str
     event_time: datetime
     remark: str | None = None
@@ -163,4 +164,25 @@ class ActivityLogOut(ActivityLogBase):
     id: int
     phase: str
     created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+# --- NEW SCHEMA FOR UNIFIED LEAD HISTORY ---
+class HistoryItemOut(BaseModel):
+    timestamp: datetime
+    event_type: str  # e.g., "Creation", "Status Change", "Activity", "Reassignment"
+    details: str
+    user: str
+
+
+class AssignmentLogBase(BaseModel):
+    lead_id: int
+    assigned_to: str
+    assigned_by: str
+
+class AssignmentLogCreate(AssignmentLogBase):
+    pass
+
+class AssignmentLogOut(AssignmentLogBase):
+    id: int
+    assigned_at: datetime
     model_config = ConfigDict(from_attributes=True)

@@ -1,3 +1,4 @@
+# message_sender.py
 import os
 import requests
 import time
@@ -6,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MAYT_API_URL = os.getenv("MAYT_API_URL")
-MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "b0cc6733-9abc-4a60-a33d-4f56fea82125")  # fallback if .env missing
+MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "eabf6096-5968-4b07-a74a-d10e34ffd97e")  # fallback if .env missing
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 
@@ -35,15 +36,22 @@ def send_message(reply_url: str, number: str, message: str, source: str = "whats
         # WhatsApp logic
         success = send_whatsapp_message(reply_url, number, message)
         return {"status": "success" if success else "error", "sent": success, "reply": message if success else "Failed to send message"}
- 
 
 
 def send_whatsapp_message(reply_url: str, number: str, message: str,) -> bool:
+    """
+    Sends a WhatsApp message.
+    Uses the provided `reply_url` if available (for replying to an incoming message).
+    Falls back to the global `MAYT_API_URL` for sending new, proactive messages.
+    """
     number = format_phone(number)
     print(f"📤 Sending WhatsApp message to {number}: {message}  TOKEN={MAYT_API_TOKEN}")
 
-    if not reply_url:
-        print("❌ Cannot send WhatsApp message, reply_url is missing.")
+    # --- NEW: Use reply_url if provided, otherwise fall back to the global API URL ---
+    target_url = reply_url or MAYT_API_URL
+
+    if not target_url:
+        print("❌ Cannot send WhatsApp message: reply_url is missing and MAYT_API_URL is not configured in .env")
         return False
 
     payload = {
@@ -58,7 +66,8 @@ def send_whatsapp_message(reply_url: str, number: str, message: str,) -> bool:
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = requests.post(reply_url, json=payload, headers=headers, timeout=10)
+            # Use the determined target_url
+            response = requests.post(target_url, json=payload, headers=headers, timeout=10)
             print(f"📤 Attempt {attempt}: {response.status_code} - {response.text}")
 
             if response.status_code == 200:

@@ -63,7 +63,7 @@ class Lead(Base):
     reminders = relationship("Reminder", back_populates="lead")
     feedbacks = relationship("Feedback", back_populates="lead")
     task_history = relationship("TaskHistory", back_populates="lead")
-    assignment_logs = relationship("AssignmentLog", back_populates="lead")
+    AssignmentLogs = relationship("AssignmentLog", back_populates="lead")
     events = relationship("Event", back_populates="lead")
     tasks = relationship("Task", back_populates="lead")
     activities = relationship("ActivityLog", back_populates="lead")
@@ -167,10 +167,10 @@ class Feedback(Base):
 
 
 class AssignmentLog(Base):
-    __tablename__ = "assignment_logs"
+    __tablename__ = "AssignmentLogs"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"))
     assigned_to = Column(String)
     assigned_by = Column(String)
     assigned_at = Column(DateTime, default=datetime.utcnow)
-    lead = relationship("Lead", back_populates="assignment_logs")
+    lead = relationship("Lead", back_populates="AssignmentLogs")

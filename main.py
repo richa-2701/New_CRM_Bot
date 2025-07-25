@@ -29,9 +29,11 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def start_background_tasks():
+    """
+    On application startup, this creates a background task that runs the reminder_loop.
+    """
+    print("🚀 Starting background task for reminders...")
     asyncio.create_task(reminder_loop())
-
-
 
 @router.get("/ping")
 async def ping():
@@ -60,9 +62,6 @@ async def test_app_message():
         },
         "response": response
     }
-
-
-
 
 def extract_company_name(text: str) -> str:
     match = re.search(r"(?:for|with)\s+(.*?)\s+(?:on|at|with|and|is|\.|,|$)", text, re.IGNORECASE)

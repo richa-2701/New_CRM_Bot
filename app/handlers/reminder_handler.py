@@ -1,85 +1,75 @@
+# app/handlers/reminder_handler.py
 from sqlalchemy.orm import Session
 from app.models import Reminder, Lead, User
 from app.message_sender import send_message
+from app.crud import get_lead_by_company, get_user_by_phone
 from datetime import datetime, timedelta
 import re
+import dateparser
+import logging
+
+logger = logging.getLogger(__name__)
+
+def parse_reminder_details(text: str) -> tuple[str | None, str | None, str | None]:
+    """
+    Parses a reminder message using a single, more robust regex.
+    Handles formats like: "remind me to [message] for/with [company] on/at [time]"
+    """
+    # Using named groups for clarity: ?P<name>
+    pattern = re.compile(
+        r"remind me to\s+(?P<message>.+?)\s+(?:for|with)\s+(?P<company>.+?)\s+(?:at|on)\s+(?P<time>.+)",
+        re.IGNORECASE
+    )
+    match = pattern.search(text)
+    if match:
+        data = match.groupdict()
+        return data.get("message").strip(), data.get("company").strip(), data.get("time").strip()
+    return None, None, None
 
 
-def handle_set_reminder(db: Session, message: str, sender: str, reply_url: str, source: str = "whatsapp"):
+async def handle_set_reminder(db: Session, message: str, sender: str, reply_url: str, source: str = "whatsapp"):
+    """
+    Handles setting a reminder for a user about a lead.
+    """
     try:
-        # Extract lead name
-        lead_match = re.search(r"for\s+(.*?)\s+(?:at|on)", message, re.IGNORECASE)
-        lead_name = lead_match.group(1).strip() if lead_match else None
+        reminder_msg, lead_name, time_str = parse_reminder_details(message)
 
-        # Extract reminder time
-        time_match = re.search(r"(?:at|on)\s+(\d{1,2}:\d{2}(?:\s*[apAP][mM])?)", message)
-        time_str = time_match.group(1) if time_match else None
+        if not all([reminder_msg, lead_name, time_str]):
+            error_msg = "⚠️ Invalid format. Use: `Remind me to [action] for [Company] on [Date/Time]`"
+            return send_message(reply_url, sender, error_msg, source)
 
-        # Extract reminder message
-        msg_match = re.search(r"remind me.*?to\s+(.*)", message, re.IGNORECASE)
-        reminder_msg = msg_match.group(1).strip() if msg_match else "Follow up reminder"
-
-        if not lead_name or not time_str:
-            response = send_message(reply_url, sender, "⚠️ Please provide lead name and time like: 'Remind me to follow up with Acme Co at 5:00 PM'", source)
-            if source.lower() == "app":
-                return response
-            return {"status": "error", "message": "Missing lead name or time"}
-
-        # Parse time
-        remind_time = parse_time(time_str)
+        # Use the powerful dateparser library
+        remind_time = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
         if not remind_time:
-            response = send_message(reply_url, sender, "❌ Invalid time format. Use HH:MM AM/PM", source)
-            if source.lower() == "app":
-                return response
-            return {"status": "error", "message": "Invalid time format"}
+            error_msg = f"❌ I couldn't understand the date or time: '{time_str}'. Please be more specific."
+            return send_message(reply_url, sender, error_msg, source)
 
         # Fetch Lead and User
-        lead = db.query(Lead).filter(Lead.company_name.ilike(f"%{lead_name}%")).first()
-        user = db.query(User).filter(User.phone == sender).first()
-
+        lead = get_lead_by_company(db, lead_name)
         if not lead:
-            response = send_message(reply_url, sender, f"⚠️ Could not find lead: {lead_name}", source)
-            if source.lower() == "app":
-                return response
-            return {"status": "error", "message": "Lead not found"}
+            return send_message(reply_url, sender, f"⚠️ Could not find lead: {lead_name}", source)
+        
+        # Correctly find user by their phone number (sender)
+        user = get_user_by_phone(db, sender)
         if not user:
-            response = send_message(reply_url, sender, f"⚠️ You are not recognized in the system.", source)
-            if source.lower() == "app":
-                return response
-            return {"status": "error", "message": "User not found"}
+            return send_message(reply_url, sender, "⚠️ You are not recognized in the system. Cannot set reminder.", source)
 
-        # Create reminder
+        # Create reminder with a consistent structure
         reminder = Reminder(
             lead_id=lead.id,
             user_id=user.id,
-            remind_at=remind_time,
+            assigned_to=user.id,  # The reminder is assigned to the person who set it
+            remind_time=remind_time,
             message=reminder_msg,
-            is_sent=False
+            status="pending" # Use a status for better tracking
         )
         db.add(reminder)
         db.commit()
 
-        response = send_message(reply_url, sender, f"✅ Reminder set for {lead.company_name} at {remind_time.strftime('%I:%M %p')}.", source)
-        if source.lower() == "app":
-            return response
-        return {"status": "success"}
+        success_msg = f"✅ Reminder set for *{lead.company_name}* on {remind_time.strftime('%A, %b %d at %I:%M %p')}."
+        return send_message(reply_url, sender, success_msg, source)
 
     except Exception as e:
         db.rollback()
-        response = send_message(reply_url, sender, f"❌ Error setting reminder: {str(e)}", source)
-        if source.lower() == "app":
-            return response
-        return {"status": "error", "details": str(e)}
-
-
-def parse_time(time_str: str) -> datetime:
-    try:
-        now = datetime.now()
-        # Support HH:MM or HH:MM AM/PM
-        if 'am' in time_str.lower() or 'pm' in time_str.lower():
-            time_obj = datetime.strptime(time_str.strip().lower(), "%I:%M %p")
-        else:
-            time_obj = datetime.strptime(time_str.strip(), "%H:%M")
-        return now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
-    except Exception:
-        return None
+        logger.error(f"❌ Error setting reminder: {e}", exc_info=True)
+        return send_message(reply_url, sender, "❌ An internal error occurred while setting the reminder.", source)

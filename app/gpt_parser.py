@@ -118,12 +118,37 @@ User Message:
         return {}, "❌ An unexpected error occurred."
 
 
+# --- THIS FUNCTION IS NOW CORRECTED ---
 def parse_update_fields(message: str):
     """
     Uses GPT to extract only optional lead fields from a message for updating an existing lead.
     """
     prompt = f"""
 You are an expert CRM assistant. Extract ONLY the following optional fields from the user's message for updating an existing lead.
+
+The message can be in natural language (e.g., "Address is Indore, team size is 10") or a simple comma-separated list.
+
+👉 **NEW RULE for comma-separated values without labels:**
+If the user provides a list of values separated by commas, map them to the following fields IN THIS EXACT ORDER. The user may not provide all values.
+1. `segment`
+2. `team_size`
+3. `phone_2`
+4. `turnover`
+5. `current_system`
+6. `machine_specification`
+7. `challenges`
+
+Example Input: "Retail, 50, 7788667766, 4 cr, Xyz, 4 colour, estimation delay"
+Example Output: 
+{{
+  "segment": "Retail",
+  "team_size": "50",
+  "phone_2": "7788667766",
+  "turnover": "4 cr",
+  "current_system": "Xyz",
+  "machine_specification": "4 colour",
+  "challenges": "estimation delay"
+}}
 
 Optional Fields to extract:
 - "email"
@@ -137,7 +162,6 @@ Optional Fields to extract:
 - "machine_specification"
 - "challenges"
 
-The message may be comma-separated or natural language. 
 Do NOT return core fields like company_name, contact_name, or phone.
 If a field is not present, omit it from the JSON.
 Return only JSON. Do not add explanations.
