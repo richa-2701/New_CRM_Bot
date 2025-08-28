@@ -1,15 +1,12 @@
 #qualification_handler.py
 import re
-from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
-import dateparser
 import logging
 
 from app.gpt_parser import parse_update_company, parse_update_fields
 from app.models import Lead, Event
 from app.crud import get_lead_by_company, create_event, get_user_by_name, update_lead_status
-from app.reminders import schedule_reminder
 from app.schemas import EventCreate
 from app.message_sender import format_phone, send_message, send_whatsapp_message
 
@@ -45,36 +42,43 @@ async def handle_qualification(db: Session, msg_text: str, sender: str, reply_ur
         logger.error(f"❌ Lead not found for company: {company_name}")
         return send_message(reply_url, sender, f"❌ No lead found with company: '{company_name}'. Please check the name and try again.", source)
 
-    update_lead_status(db, lead_id=lead.id, status="Qualified", updated_by=sender)
+    update_lead_status(db, lead_id=lead.id, status="Qualified", updated_by=str(sender))
     
-    # --- REVISED LOGIC FOR NOTIFICATIONS AND RESPONSE ---
-    
-    # 1. Independent Assignee Notification (works for both app and WhatsApp)
-    # This now uses send_whatsapp_message directly and does not affect the user response.
+    # --- Independent Assignee Notification ---
     if lead.assigned_to:
         user = get_user_by_name(db, lead.assigned_to)
-        if user and user.usernumber and user.usernumber != sender:
-            # Using reply_url = "" for app source is fine because send_whatsapp_message will fall back to MAYT_API_URL.
+        # Ensure sender is a string for comparison
+        sender_identifier = str(sender)
+        if user and user.usernumber and user.usernumber != sender_identifier:
             send_whatsapp_message(
                 reply_url,
                 format_phone(user.usernumber),
                 f"📢 Lead Qualified: The lead for {company_name} has been marked as qualified."
             )
 
-    # 2. Construct a multi-part response for the user.
+    # --- THIS IS THE CORRECTED CODE BLOCK ---
+    # We now check for missing fields, accessing contact details correctly.
     reply_parts = [f"✅ Lead for '{company_name}' marked as Qualified."]
     
     missing_fields = []
     if not lead.address: missing_fields.append("Address")
     if not lead.segment: missing_fields.append("Segment")
     if not lead.team_size: missing_fields.append("Team Size")
-    if not lead.email: missing_fields.append("Email")
-    if not lead.phone_2: missing_fields.append("Alternate Phone (phone_2)")
     if not lead.turnover: missing_fields.append("Turnover")
     if not lead.current_system: missing_fields.append("Current System")
     if not lead.machine_specification: missing_fields.append("Machine Specification")
     if not lead.challenges: missing_fields.append("Challenges")
-    if not lead.remark or "No remark provided." in lead.remark: missing_fields.append("Remark")
+    
+    # To check for email, we look at the first contact in the list.
+    # The `lead.contacts` relationship will be a list. We check if it's not empty.
+    if lead.contacts and not lead.contacts[0].email:
+        missing_fields.append("Email for primary contact")
+    elif not lead.contacts:
+        missing_fields.append("Primary Contact Details (Phone, Email)")
+
+    if not lead.remark or "No remark provided." in lead.remark:
+        missing_fields.append("Remark")
+    # --- END CORRECTION ---
     
     if missing_fields:
         ask_msg = (
@@ -90,13 +94,11 @@ async def handle_qualification(db: Session, msg_text: str, sender: str, reply_ur
         reply_parts.append(ask_4_phase_msg)
         pending_context[sender] = {"intent": "awaiting_4_phase_decision", "company_name": company_name}
 
-    # 3. Combine parts and send a single, unified response.
     final_reply = "\n\n".join(reply_parts)
     return send_message(reply_url, sender, final_reply, source)
 
 
 async def handle_qualification_update(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
-    """Handles the user's reply (missing details or 'skip') after lead qualification."""
     context = pending_context.get(sender)
     if not context or context.get("intent") != "awaiting_qualification_details":
         return send_message(reply_url, sender, "Sorry, I seem to have lost track. How can I help?", source)
@@ -133,23 +135,19 @@ async def handle_qualification_update(db: Session, msg_text: str, sender: str, r
             db.commit()
             reply_parts.append(f"✅ Details for '{company_name}' updated: {', '.join(updated_fields)}.")
 
-    # Always ask about the 4-phase meeting after handling details.
     ask_4_phase_msg = (
         f"Next, do you want to schedule the 4-phase meeting for *{company_name}*? (Reply with Yes/No)"
     )
     reply_parts.append(ask_4_phase_msg)
     
-    # Set context for the next step
     pending_context[sender] = {"intent": "awaiting_4_phase_decision", "company_name": company_name}
     logger.info(f"Set context for {sender} to 'awaiting_4_phase_decision' for company '{company_name}'")
 
-    # Combine parts and send a single, unified response.
     final_reply = "\n\n".join(reply_parts)
     return send_message(reply_url, sender, final_reply, source)
 
 
 async def handle_4_phase_decision(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
-    """Handles the user's Yes/No reply to scheduling a 4-phase meeting."""
     context = pending_context.get(sender)
     if not context or context.get("intent") != "awaiting_4_phase_decision":
         return send_message(reply_url, sender, "Sorry, I seem to have lost track. How can I help?", source)
@@ -172,7 +170,6 @@ async def handle_4_phase_decision(db: Session, msg_text: str, sender: str, reply
         )
     else:
         logger.info(f"User {sender} skipped the 4-phase meeting for {company_name}.")
-        # Construct a combined response for skipping
         reply_parts = [
             f"👍 Understood. We will skip the 4-phase meeting for now.",
             (f"The next step is to schedule a demo. You can use:\n"

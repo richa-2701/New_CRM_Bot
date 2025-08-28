@@ -1,9 +1,10 @@
 # app/reminders.py
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
-from app.models import Reminder, User
+from app.models import Reminder, User, LeadDripAssignment
 from app.message_sender import send_whatsapp_message
+from app.crud import get_active_drip_assignments, get_sent_step_ids_for_assignment, log_sent_drip_message
 import asyncio
 import logging
 
@@ -87,3 +88,64 @@ async def reminder_loop():
 
         # Sleep for 60 seconds (1 minute) between checks
         await asyncio.sleep(60)
+
+
+
+async def drip_campaign_loop():
+    """A continuous background loop to process and send drip campaign messages."""
+    while True:
+        db = SessionLocal()
+        try:
+            today = date.today()
+            now = datetime.utcnow().time()
+            
+            active_assignments = get_active_drip_assignments(db)
+            
+            for assignment in active_assignments:
+                days_passed = (today - assignment.start_date).days
+                
+                # Ensure lead and contacts are loaded
+                if not assignment.lead or not assignment.lead.contacts:
+                    logger.warning(f"Skipping drip assignment {assignment.id} for lead {assignment.lead_id} due to missing data.")
+                    continue
+
+                sent_step_ids = get_sent_step_ids_for_assignment(db, assignment.id)
+
+                steps_to_process = [
+                    step for step in assignment.drip_sequence.steps
+                    if step.id not in sent_step_ids and step.day_to_send <= days_passed
+                ]
+
+                for step in steps_to_process:
+                    try:
+                        # Parse the scheduled time from the step
+                        scheduled_time = time.fromisoformat(step.time_to_send)
+                        
+                        # Check if it's time to send (or if it's a past-due message for today)
+                        if step.day_to_send < days_passed or (step.day_to_send == days_passed and now >= scheduled_time):
+                            message_content = step.message.message_content
+                            
+                            # Get the primary contact's phone number
+                            primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
+                            if primary_contact and message_content:
+                                success = send_whatsapp_message(
+                                    reply_url=None, # System-initiated message
+                                    number=primary_contact.phone,
+                                    message=message_content
+                                )
+                                if success:
+                                    log_sent_drip_message(db, assignment_id=assignment.id, step_id=step.id)
+                                    logger.info(f"Sent drip message step {step.id} to lead {assignment.lead_id}.")
+                                else:
+                                    logger.error(f"Failed to send drip message step {step.id} to lead {assignment.lead_id}.")
+                    except Exception as step_e:
+                        logger.error(f"Error processing step {step.id} for assignment {assignment.id}: {step_e}", exc_info=True)
+
+        except Exception as outer_e:
+            logger.error(f"⚠️ An error occurred in the drip campaign loop: {outer_e}", exc_info=True)
+            db.rollback()
+        finally:
+            db.close()
+
+        # Check every 5 minutes
+        await asyncio.sleep(300)

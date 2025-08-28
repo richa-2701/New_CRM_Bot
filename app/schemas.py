@@ -1,7 +1,25 @@
 # app/schemas.py
 from pydantic import BaseModel, ConfigDict
-from typing import Optional, Union
-from datetime import datetime
+from typing import Optional, Union, List
+from datetime import datetime, time
+
+# ---------------- CONTACT SCHEMAS ----------------
+class ContactBase(BaseModel):
+    contact_name: str
+    phone: str
+    email: Optional[str] = None
+    designation: Optional[str] = None
+
+class ContactCreate(ContactBase):
+    pass
+
+class ContactUpdate(ContactBase):
+    id: Optional[int] = None 
+
+class ContactOut(ContactBase):
+    id: int
+    lead_id: int
+    model_config = ConfigDict(from_attributes=True)
 
 # ---------------- USER SCHEMAS ----------------
 class UserCreate(BaseModel):
@@ -42,8 +60,6 @@ class UserResponse(BaseModel):
 # ---------------- LEAD SCHEMAS ----------------
 class LeadBase(BaseModel):
     company_name: str
-    contact_name: str
-    phone: str
     email: Optional[str] = None
     address: Optional[str] = None
     team_size: Optional[Union[str, int]] = None
@@ -60,19 +76,28 @@ class LeadBase(BaseModel):
 
 class LeadCreate(LeadBase):
     created_by: str
-    assigned_to: Optional[str]
+    assigned_to: str
+    contacts: List[ContactCreate] 
 
-class LeadOut(LeadBase):
+# --- THIS IS THE CORRECTED AND FINAL LeadResponse SCHEMA ---
+# It now correctly inherits from LeadBase and has only one model_config.
+class LeadResponse(LeadBase):
     id: int
-    status: str
+    status: Optional[str]
+    assigned_to: str
+    created_by: str
     created_at: datetime
-    assigned_to: Optional[str]
+    updated_at: Optional[datetime]
+    
+    # This is the new field to include all associated contacts.
+    contacts: List[ContactOut] = []
+    
+    # This configuration must be defined only once, at the end.
     model_config = ConfigDict(from_attributes=True)
+# --- END CORRECTION ---
 
 class LeadUpdateWeb(BaseModel):
     company_name: Optional[str] = None
-    contact_name: Optional[str] = None
-    phone: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None
     team_size: Optional[Union[str, int]] = None
@@ -88,30 +113,7 @@ class LeadUpdateWeb(BaseModel):
     lead_type: Optional[str] = None
     assigned_to: Optional[str] = None
     status: Optional[str] = None
-    model_config = ConfigDict(from_attributes=True)
-
-class LeadResponse(BaseModel):
-    id: int
-    company_name: str
-    contact_name: Optional[str]
-    phone: Optional[str]
-    email: Optional[str]
-    address: Optional[str]
-    source: Optional[str]
-    segment: Optional[str]
-    team_size: Optional[str]
-    remark: Optional[str]
-    status: Optional[str]
-    assigned_to: str
-    created_by: str
-    created_at: datetime
-    updated_at: Optional[datetime]
-    phone_2: Optional[str]
-    turnover: Optional[str]
-    current_system: Optional[str]
-    machine_specification: Optional[str]
-    challenges: Optional[str]
-    lead_type: Optional[str]
+    contacts: List[ContactUpdate] = []
     model_config = ConfigDict(from_attributes=True)
 
 # ---------------- TASK SCHEMAS ----------------
@@ -199,6 +201,7 @@ class ActivityLogOut(BaseModel):
     lead_id: int
     phase: str
     details: str
+    attachment_path: Optional[str] = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
@@ -212,3 +215,74 @@ class AssignmentLogCreate(BaseModel):
     lead_id: int
     assigned_to: str
     assigned_by: str
+
+class MessageMasterBase(BaseModel):
+    message_name: str
+    message_content: Optional[str] = None
+    message_type: str # 'text', 'media', 'document'
+    attachment_path: Optional[str] = None
+
+class MessageMasterCreate(MessageMasterBase):
+    created_by: str
+
+class MessageMasterUpdate(MessageMasterBase):
+    pass
+
+class MessageMasterOut(MessageMasterBase):
+    id: int
+    message_code: str
+    created_at: datetime
+    created_by: str
+    
+    model_config = ConfigDict(from_attributes=True)
+
+# --- Drip Sequence Schemas ---
+class DripSequenceStepBase(BaseModel):
+    message_id: int
+    day_to_send: int
+    time_to_send: time # Use `time` for validation
+    sequence_order: int
+
+class DripSequenceStepCreate(DripSequenceStepBase):
+    pass
+
+class DripSequenceCreate(BaseModel):
+    drip_name: str
+    created_by: str
+    steps: list[DripSequenceStepCreate]
+
+class DripSequenceStepOut(DripSequenceStepBase):
+    id: int
+    # Include message details in the response for the frontend
+    message: MessageMasterOut
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DripSequenceOut(BaseModel):
+    id: int
+    drip_code: str
+    drip_name: str
+    created_at: datetime
+    created_by: str
+    steps: list[DripSequenceStepOut]
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class DripSequenceListOut(BaseModel): # For the main list view
+    id: int
+    drip_code: str
+    drip_name: str
+    created_at: datetime
+    created_by: str
+    model_config = ConfigDict(from_attributes=True)
+
+class ReminderOut(BaseModel):
+    id: int
+    lead_id: int # We need the lead_id to link back to the lead
+    remind_time: datetime
+    message: str
+    assigned_to: str
+    status: str
+    created_at: datetime
+    # --- ADD THIS LINE ---
+    model_config = ConfigDict(from_attributes=True)

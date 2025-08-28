@@ -1,17 +1,18 @@
 # main.py
 from fastapi import APIRouter, Request, FastAPI
+from fastapi.staticfiles import StaticFiles
 from app.gpt_parser import parse_lead_info
 from app.message_sender import send_whatsapp_message
 from app.crud import save_lead, update_lead_status
 from app.schemas import LeadCreate
+from app.reminders import reminder_loop, drip_campaign_loop
 import re
-# --- THIS IS THE CORRECTED LINE ---
-# We now only import the routers that are actually defined in webhook.py
 from app.webhook import main_router, web_router
-# --- END CORRECTION ---
-from app.reminders import reminder_loop
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
+from app.db import Base, engine
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="WhatsApp CRM Bot API",
@@ -42,6 +43,8 @@ app.include_router(main_router)
 app.include_router(web_router, prefix="/web", tags=["Web Application"])
 
 
+app.mount("/attachments", StaticFiles(directory="uploads"), name="attachments")
+
 @app.on_event("startup")
 async def start_background_tasks():
     """
@@ -49,6 +52,9 @@ async def start_background_tasks():
     """
     print("🚀 Starting background task for reminders...")
     asyncio.create_task(reminder_loop())
+
+    print("🚀 Starting background task for drip campaigns...")
+    asyncio.create_task(drip_campaign_loop())
 
 @app.get("/ping", tags=["Health"])
 async def ping():
