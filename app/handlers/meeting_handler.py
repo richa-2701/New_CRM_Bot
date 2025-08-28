@@ -1,12 +1,13 @@
 # app/handlers/meeting_handler.py
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 import dateparser
 import logging
-from app.models import Lead, Event
-from app.crud import get_lead_by_company, create_event, get_user_by_phone, get_user_by_name, update_lead_status, create_activity_log
-from app.schemas import EventCreate, ActivityLogCreate
+from app.models import Lead, Event, Demo, Reminder
+# --- MODIFIED: Import is_user_available and create_reminder ---
+from app.crud import get_lead_by_company, create_event, get_user_by_phone, get_user_by_name, update_lead_status, create_activity_log, is_user_available, create_reminder
+from app.schemas import EventCreate, ActivityLogCreate, ReminderCreate
 from app.message_sender import send_message, format_phone, send_whatsapp_message
 from app.temp_store import temp_store
 from app.handlers.lead_handler import handle_update_lead
@@ -14,6 +15,8 @@ from app.gpt_parser import parse_update_fields, parse_core_lead_update
 from app.handlers.qualification_handler import pending_context
 
 logger = logging.getLogger(__name__)
+
+MEETING_DEFAULT_DURATION_MINUTES = 20
 
 def extract_details_for_event(text: str):
     company_name, assigned_to, meeting_time_str = None, None, None
@@ -47,23 +50,64 @@ async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: 
         if not user_for_assignment:
             return send_message(reply_url, sender_phone, f"❌ Could not find an assignee named '{assigned_to_name}'. Please specify a valid user.", source)
 
-        meeting_dt = dateparser.parse(meeting_time_str, settings={'PREFER_DATES_FROM': 'future', 'DATE_ORDER': 'DMY'})
+        # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
+        meeting_dt = dateparser.parse(meeting_time_str, settings={'DATE_ORDER': 'DMY'})
         if not meeting_dt:
             return send_message(reply_url, sender_phone, f"❌ Could not understand the date/time: '{meeting_time_str}'", source)
+
+        # Perform the check immediately after parsing.
+        if meeting_dt < datetime.utcnow():
+            error_msg = f"❌ The date and time you entered ({meeting_dt.strftime('%d-%b-%Y %I:%M %p')}) is in the past. Please provide a future date and time."
+            return send_message(reply_url, sender_phone, error_msg, source)
+        # --- END OF FIX ---
+
+        meeting_end_dt = meeting_dt + timedelta(minutes=MEETING_DEFAULT_DURATION_MINUTES)
+        
+        conflict = is_user_available(db, user_for_assignment.username, user_for_assignment.usernumber, meeting_dt, meeting_end_dt)
+        if conflict:
+            conflict_type = "Meeting" if isinstance(conflict, Event) else "Demo"
+            conflict_lead = db.query(Lead).filter(Lead.id == conflict.lead_id).first()
+            conflict_lead_name = conflict_lead.company_name if conflict_lead else "another task"
+            conflict_start = conflict.event_time if isinstance(conflict, Event) else conflict.start_time
+            
+            error_msg = (
+                f"❌ Scheduling failed. *{user_for_assignment.username}* is already booked at that time.\n\n"
+                f"Conflict: {conflict_type} with *{conflict_lead_name}*\n"
+                f"Time: {conflict_start.strftime('%I:%M %p')}"
+            )
+            return send_message(reply_url, sender_phone, error_msg, source)
 
         event_data = EventCreate(
             lead_id=lead.id,
             assigned_to=user_for_assignment.username,
             event_type="Meeting",
             event_time=meeting_dt,
-            created_by=sender_phone,
+            event_end_time=meeting_end_dt,
+            created_by=str(sender_phone),
             remark=f"Scheduled via {source} by {sender_phone}"
         )
         new_event = create_event(db, event=event_data)
         logger.info(f"✅ Meeting event created with ID: {new_event.id} for lead: {lead.company_name}")
 
-        # --- REVISED NOTIFICATION AND RESPONSE LOGIC ---
-        # 1. Notify assignee independently (works for app and WhatsApp)
+        time_formatted = meeting_dt.strftime('%A, %b %d at %I:%M %p')
+        reminder_message = f"You have a meeting scheduled for *{lead.company_name}* on {time_formatted}."
+
+        one_day_before = meeting_dt - timedelta(days=1)
+        if one_day_before > datetime.utcnow():
+            create_reminder(db, ReminderCreate(
+                lead_id=lead.id, user_id=user_for_assignment.id, assigned_to=user_for_assignment.username,
+                remind_time=one_day_before, message=f"(1 day away) {reminder_message}"
+            ))
+
+        one_hour_before = meeting_dt - timedelta(hours=1)
+        if one_hour_before > datetime.utcnow():
+            create_reminder(db, ReminderCreate(
+                lead_id=lead.id, user_id=user_for_assignment.id, assigned_to=user_for_assignment.username,
+                remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}"
+            ))
+        
+        logger.info(f"Scheduled pre-meeting reminders for event ID {new_event.id}")
+
         if user_for_assignment and user_for_assignment.usernumber and user_for_assignment.usernumber != sender_phone:
             notification_msg = (
                 f"📢 A new meeting has been scheduled for you:\n"
@@ -73,13 +117,123 @@ async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: 
             send_whatsapp_message(reply_url, format_phone(user_for_assignment.usernumber), notification_msg)
             logger.info(f"✅ Sent meeting notification to assignee {user_for_assignment.username} at {user_for_assignment.usernumber}")
 
-        # 2. Send confirmation to the original user (app or WhatsApp)
-        confirmation = f"✅ Meeting scheduled for '{lead.company_name}' with {user_for_assignment.username} on {meeting_dt.strftime('%A, %b %d at %I:%M %p')}."
+        confirmation = f"✅ Meeting scheduled for '{lead.company_name}' with {user_for_assignment.username} on {meeting_dt.strftime('%A, %b %d at %I:%M %p')}. Reminders have been set."
         return send_message(reply_url, sender_phone, confirmation, source)
 
     except Exception as e:
         logger.error(f"❌ Error in handle_meeting_schedule: {e}", exc_info=True)
         return send_message(reply_url, sender_phone, "❌ An internal error occurred while scheduling the meeting.", source)
+
+async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
+    try:
+        match = re.search(r"reschedule\s+meeting\s+for\s+(.+?)\s+on\s+(.+?)(?:\s+(?:assigned\s+to|to)\s+(.+))?$", msg_text, re.IGNORECASE)
+        if not match:
+            return send_message(reply_url, sender, "⚠️ Invalid format. Use: 'Reschedule meeting for [Company] on [Date] to [New Assignee]'", source)
+
+        company_name = match.group(1).strip()
+        new_time_str = match.group(2).strip()
+        new_assignee_name = match.group(3).strip() if match.group(3) else None
+
+        # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
+        new_datetime = dateparser.parse(new_time_str, settings={'DATE_ORDER': 'DMY'})
+        if not new_datetime:
+            return send_message(reply_url, sender, f"❌ Couldn't parse new meeting time: '{new_time_str}'", source)
+
+        # Perform the check immediately after parsing.
+        if new_datetime < datetime.utcnow():
+            error_msg = f"❌ The new date and time you entered ({new_datetime.strftime('%d-%b-%Y %I:%M %p')}) is in the past. Please provide a future date and time."
+            return send_message(reply_url, sender, error_msg, source)
+        # --- END OF FIX ---
+
+        lead = get_lead_by_company(db, company_name)
+        if not lead:
+            return send_message(reply_url, sender, f"❌ Lead not found for company: {company_name}", source)
+
+        event = db.query(Event).filter(Event.lead_id == lead.id, Event.event_type.in_(["4 Phase Meeting","Meeting"])).order_by(Event.event_time.desc()).first()
+        if not event:
+            return send_message(reply_url, sender, f"⚠️ No existing meeting found for {company_name}", source)
+        
+        final_assignee_user = None
+        if new_assignee_name:
+            lookup_user = get_user_by_name(db, new_assignee_name) or get_user_by_phone(db, new_assignee_name)
+            if not lookup_user:
+                return send_message(reply_url, sender, f"❌ Could not find the new assignee: '{new_assignee_name}'", source)
+            final_assignee_user = lookup_user
+        else:
+            lookup_user = get_user_by_name(db, event.assigned_to)
+            if not lookup_user:
+                logger.error(f"Critical error: Could not find original assignee '{event.assigned_to}' for event ID {event.id}")
+                return send_message(reply_url, sender, "❌ Internal error: Could not verify the original assignee.", source)
+            final_assignee_user = lookup_user
+        
+        new_end_datetime = new_datetime + timedelta(minutes=MEETING_DEFAULT_DURATION_MINUTES)
+        
+        conflict = is_user_available(db, final_assignee_user.username, final_assignee_user.usernumber, new_datetime, new_end_datetime, exclude_event_id=event.id)
+        if conflict:
+            conflict_type = "Meeting" if isinstance(conflict, Event) else "Demo"
+            conflict_lead = db.query(Lead).filter(Lead.id == conflict.lead_id).first()
+            conflict_lead_name = conflict_lead.company_name if conflict_lead else "another task"
+            conflict_start = conflict.event_time if isinstance(conflict, Event) else conflict.start_time
+            
+            error_msg = (
+                f"❌ Rescheduling failed. *{final_assignee_user.username}* is already booked at that time.\n\n"
+                f"Conflict: {conflict_type} with *{conflict_lead_name}*\n"
+                f"Time: {conflict_start.strftime('%I:%M %p')}"
+            )
+            return send_message(reply_url, sender, error_msg, source)
+        
+        db.query(Reminder).filter(Reminder.lead_id == lead.id, Reminder.message.like(f"%meeting scheduled for *{lead.company_name}*%")).delete(synchronize_session=False)
+        
+        time_formatted = new_datetime.strftime('%A, %b %d at %I:%M %p')
+        reminder_message = f"You have a meeting scheduled for *{lead.company_name}* on {time_formatted}."
+
+        one_day_before = new_datetime - timedelta(days=1)
+        if one_day_before > datetime.utcnow():
+            create_reminder(db, ReminderCreate(
+                lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
+                remind_time=one_day_before, message=f" (1 day away) {reminder_message}"
+            ))
+
+        one_hour_before = new_datetime - timedelta(hours=1)
+        if one_hour_before > datetime.utcnow():
+            create_reminder(db, ReminderCreate(
+                lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
+                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}"
+            ))
+        
+        logger.info(f"Re-scheduled pre-meeting reminders for event ID {event.id} for user {final_assignee_user.username}")
+        
+        old_time = event.event_time.strftime('%d %b %Y at %I:%M %p')
+        new_time_formatted = new_datetime.strftime('%d %b %Y at %I:%M %p')
+
+        event.event_time = new_datetime
+        event.event_end_time = new_end_datetime
+        event.assigned_to = final_assignee_user.username
+        event.remark = f"Rescheduled via {source} by {sender}"
+        db.commit()
+
+        activity_details = f"Meeting rescheduled from {old_time} to {new_time_formatted} by {sender}."
+        if new_assignee_name:
+            activity_details += f" New assignee is {final_assignee_user.username}."
+        create_activity_log(db, activity=ActivityLogCreate(lead_id=lead.id, phase=lead.status, details=activity_details))
+
+        if final_assignee_user.usernumber and final_assignee_user.usernumber != sender:
+            notification = f"📢 Meeting for *{company_name}* has been rescheduled for you.\n📅 New Time: {new_time_formatted}"
+            send_whatsapp_message(reply_url, format_phone(final_assignee_user.usernumber), notification)
+            logger.info(f"✅ Sent reschedule notification to assignee {final_assignee_user.username} at {final_assignee_user.usernumber}")
+
+        confirmation = f"✅ Meeting for *{company_name}* rescheduled to {new_time_formatted}. Reminders have been updated."
+        if new_assignee_name:
+            confirmation += f"\n👤 It is now assigned to: {final_assignee_user.username}"
+        
+        return send_message(reply_url, sender, confirmation, source)
+
+    except Exception as e:
+        logging.exception("❌ Exception during meeting reschedule")
+        db.rollback()
+        return send_message(reply_url, sender, "❌ Internal error while rescheduling meeting.", source)
+
+
 
 async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
     company_name = extract_company_name_from_meeting_update(msg_text)
@@ -101,7 +255,6 @@ async def handle_post_meeting_update(db: Session, msg_text: str, sender: str, re
 
     update_lead_status(db, lead_id=lead.id, status="Meeting Done", updated_by=sender, remark=remark if remark != "No remark provided." else "Meeting completed.")
 
-    # --- REVISED RESPONSE LOGIC ---
     reply_parts = [
         f"✅ Meeting marked done for *{company_name}*.",
         "Do you need to update the core details for this lead (e.g., Company Name, Contact)?\n\nPlease reply with *Yes* or *No*."
@@ -170,10 +323,6 @@ async def handle_core_lead_update(db: Session, msg_text: str, sender: str, reply
     return send_message(reply_url, sender, final_reply, source)
 
 def _get_post_update_prompt(db: Session, company_name: str) -> (str, str or None):
-    """
-    Helper to generate the next prompt after a meeting update, checking for missing fields.
-    Returns the message string and the next context intent, if any.
-    """
     lead = get_lead_by_company(db, company_name)
     if not lead:
         return "An unexpected error occurred.", None
@@ -245,51 +394,6 @@ async def handle_meeting_details_update(db: Session, msg_text: str, sender: str,
     final_reply = "\n\n".join(reply_parts)
     
     return send_message(reply_url, sender, final_reply, source)
-
-async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
-    try:
-        match = re.search(r"reschedule\s+meeting\s+for\s+(.+?)\s+on\s+(.+)", msg_text, re.IGNORECASE)
-        if not match:
-            return send_message(reply_url, sender, "⚠️ Invalid format. Use: 'Reschedule meeting for [Company Name] on [Date and Time]'", source)
-
-        company_name, new_time_str = match.group(1).strip(), match.group(2).strip()
-        new_datetime = dateparser.parse(new_time_str, settings={'PREFER_DATES_FROM': 'future'})
-        if not new_datetime:
-            return send_message(reply_url, sender, f"❌ Couldn't parse new meeting time: '{new_time_str}'", source)
-
-        lead = get_lead_by_company(db, company_name)
-        if not lead:
-            return send_message(reply_url, sender, f"❌ Lead not found for company: {company_name}", source)
-
-        event = db.query(Event).filter(Event.lead_id == lead.id, Event.event_type.in_(["4 Phase Meeting","Meeting"])).order_by(Event.event_time.desc()).first()
-        if not event:
-            return send_message(reply_url, sender, f"⚠️ No existing meeting found for {company_name}", source)
-        
-        old_time = event.event_time.strftime('%d %b %Y at %I:%M %p')
-        new_time_formatted = new_datetime.strftime('%d %b %Y at %I:%M %p')
-
-        event.event_time = new_datetime
-        event.remark = f"Rescheduled via {source} by {sender}"
-        db.commit()
-
-        activity_details = f"Meeting rescheduled from {old_time} to {new_time_formatted} by {sender}."
-        create_activity_log(db, activity=ActivityLogCreate(lead_id=lead.id, phase=lead.status, details=activity_details))
-
-        # Notify assignee independently
-        if event.assigned_to:
-            assigned_user = get_user_by_name(db, event.assigned_to)
-            if assigned_user and assigned_user.usernumber and assigned_user.usernumber != sender:
-                notification = f"📢 Meeting for *{company_name}* has been rescheduled.\n📅 New Time: {new_time_formatted}"
-                send_whatsapp_message(reply_url, format_phone(assigned_user.usernumber), notification)
-                logger.info(f"✅ Sent reschedule notification to assignee {assigned_user.username} at {assigned_user.usernumber}")
-
-        # Send confirmation to original user
-        confirmation = f"✅ Meeting for *{company_name}* rescheduled to {new_time_formatted}."
-        return send_message(reply_url, sender, confirmation, source)
-
-    except Exception as e:
-        logging.exception("❌ Exception during meeting reschedule")
-        return send_message(reply_url, sender, "❌ Internal error while rescheduling meeting.", source)
 
 def extract_company_name_from_meeting_update(msg_text: str) -> str:
     match = re.search(r"meeting done for (.+?)(?:\.|,| is| they|$)", msg_text, re.IGNORECASE)

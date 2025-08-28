@@ -19,7 +19,8 @@ def parse_lead_info(message: str):
     Uses GPT to extract structured lead info from both natural language and comma-separated formats.
     """
     prompt = f"""
-You are an expert CRM assistant. Extract the following fields from the user's message.
+You are an expert CRM assistant. Your primary task is to extract structured information from a user's message.
+A critical rule is that the "company_name" can contain multiple words and spaces (e.g., "The Park Hotels", "ABC Corp Pvt Ltd"). You must capture the full company name.
 
 The input message can be in various formats:
 1. A natural sentence: "There is a lead from ABC Pvt Ltd, contact is Ramesh (9876543210), assign to Banwari, source is referral"
@@ -292,7 +293,7 @@ def parse_update_company(message: str) -> str:
     lowered_msg = msg.lower()
 
     # Pattern to find company name after keywords like 'for' or 'is'
-    match = re.search(r"(?:qualified\s+for|company\s+is|for)\s+([A-Za-z0-9\s&.'-]+)", lowered_msg)
+    match = re.search(r"(?:qualified\s+for|company\s+is|for)\s+(.+)", lowered_msg)
     if match:
         # Use .title() to properly capitalize company names like "Parksons"
         return match.group(1).strip().title()

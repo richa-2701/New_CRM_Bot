@@ -1,5 +1,6 @@
 # message_sender.py
 import os
+from typing import Union
 import requests
 import time
 from dotenv import load_dotenv
@@ -11,11 +12,19 @@ MAYT_API_TOKEN = os.getenv("MAYT_API_TOKEN", "eabf6096-5968-4b07-a74a-d10e34ffd9
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
 
-def format_phone(phone: str) -> str:
-    phone = phone.strip().replace("+", "")
-    if not phone.startswith("91"):
-        return "91" + phone
-    return phone
+def format_phone(phone: Union[str, int]) -> str:
+    """
+    Safely formats a phone number, whether it's passed as a string or an integer.
+    """
+    # 1. Convert the input to a string, no matter what it is.
+    phone_str = str(phone)
+    
+    # 2. Perform string operations on the guaranteed string.
+    phone_str = phone_str.strip().replace("+", "")
+    
+    if not phone_str.startswith("91"):
+        return "91" + phone_str
+    return phone_str
 
 def app_reply_json(message: str, source: str) -> dict:
     """Returns JSON response for app-based messages"""

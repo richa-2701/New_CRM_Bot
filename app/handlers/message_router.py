@@ -3,7 +3,7 @@ import re
 import logging
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
-from app.gpt_parser import parse_intent_and_fields, parse_lead_info
+from app.gpt_parser import parse_intent_and_fields, parse_lead_info, parse_update_company
 from app.message_sender import send_whatsapp_message,send_message
 # --- MODIFIED: Import `get_lead_by_company` ---
 from app.crud import update_lead_status, get_user_by_name, get_lead_by_company
@@ -48,55 +48,20 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
             
             # --- START OF ALL CONTEXT-BASED ROUTING ---
             
-            if context.get("intent") == "qualification_pending":
-                logger.info(f"Routing follow-up message from {sender} to qualification handler.")
-                return await qualification_handler.handle_qualification(
-                    db=db,
-                    msg_text=message_text,
-                    sender=sender,
-                    reply_url=reply_url,
-                    source=source
-                )
-            elif context.get("intent") == "awaiting_qualification_details":
-                logger.info(f"Routing qualification details update from {sender} to its handler.")
-                return await qualification_handler.handle_qualification_update(
-                    db=db,
-                    msg_text=message_text,
-                    sender=sender,
-                    reply_url=reply_url,
-                    source=source
-                )
-            elif context.get("intent") == "awaiting_4_phase_decision":
-                logger.info(f"Routing 4-phase meeting decision from {sender} to its handler.")
-                return await qualification_handler.handle_4_phase_decision(
-                    db=db,
-                    msg_text=message_text,
-                    sender=sender,
-                    reply_url=reply_url,
-                    source=source
-                )
-            # --- NEW ROUTING LOGIC FOR POST-MEETING FLOW ---
-            elif context.get("intent") == "awaiting_details_change_decision":
-                logger.info(f"Routing core detail change decision from {sender} to meeting handler.")
-                return await meeting_handler.handle_details_change_decision(
-                    db=db,
-                    msg_text=message_text,
-                    sender=sender,
-                    reply_url=reply_url,
-                    source=source
-                )
-            elif context.get("intent") == "awaiting_core_lead_update":
-                logger.info(f"Routing core lead update from {sender} to meeting handler.")
-                return await meeting_handler.handle_core_lead_update(
-                    db=db,
-                    msg_text=message_text,
-                    sender=sender,
-                    reply_url=reply_url,
-                    source=source
-                )
-            elif context.get("intent") == "awaiting_meeting_details":
-                logger.info(f"Routing final meeting details update from {sender} to its handler.")
-                return await meeting_handler.handle_meeting_details_update(
+            # --- START OF ALL CONTEXT-BASED ROUTING ---
+            context_handlers = {
+                "qualification_pending": qualification_handler.handle_qualification,
+                "awaiting_qualification_details": qualification_handler.handle_qualification_update,
+                "awaiting_4_phase_decision": qualification_handler.handle_4_phase_decision,
+                "awaiting_details_change_decision": meeting_handler.handle_details_change_decision,
+                "awaiting_core_lead_update": meeting_handler.handle_core_lead_update,
+                "awaiting_meeting_details": meeting_handler.handle_meeting_details_update,
+            }
+
+            handler = context_handlers.get(context.get("intent"))
+            if handler:
+                logger.info(f"Routing message from {sender} to {context.get("intent")} handler.")
+                return await handler(
                     db=db,
                     msg_text=message_text,
                     sender=sender,
@@ -176,7 +141,7 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
 
         # --- MODIFIED: Refactored to use centralized status update ---
         elif "not interested" in lowered_text:
-            company = extract_company_name(message_text)
+            company = parse_update_company(message_text)
             lead = get_lead_by_company(db, company)
             if not lead:
                 response = send_message(reply_url, sender, f"❌ Lead not found for '{company}'.", source)
@@ -194,7 +159,7 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
             return {"status": "success"}
 
         elif "not in our segment" in lowered_text:
-            company = extract_company_name(message_text)
+            company = parse_update_company(message_text)
             lead = get_lead_by_company(db, company)
             if not lead:
                 response = send_message(reply_url, sender, f"❌ Lead not found for '{company}'.", source)

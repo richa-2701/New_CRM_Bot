@@ -2,7 +2,43 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, Union
 from datetime import datetime
-from app.models import LeadStatus, TaskStatus
+
+# ---------------- USER SCHEMAS ----------------
+class UserCreate(BaseModel):
+    username: str
+    usernumber: str
+    email: Optional[str] = None
+    department: Optional[str] = None
+    password: str
+    role: Optional[str] = "Company User"
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class UserPasswordChange(BaseModel):
+    username: str
+    old_password: str
+    new_password: str
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    usernumber: Optional[str] = None
+    email: Optional[str] = None
+    department: Optional[str] = None
+    role: Optional[str] = None
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    usernumber: str
+    email: Optional[str]
+    department: Optional[str]
+    role: Optional[str]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    model_config = ConfigDict(from_attributes=True)
+
 # ---------------- LEAD SCHEMAS ----------------
 class LeadBase(BaseModel):
     company_name: str
@@ -14,27 +50,45 @@ class LeadBase(BaseModel):
     source: str
     segment: Optional[str] = None
     remark: Optional[str] = None
-    product: Optional[str] = None  # optional for future use
+    product: Optional[str] = None
     phone_2: Optional[str] = None
     turnover: Optional[str] = None
     current_system: Optional[str] = None
     machine_specification: Optional[str] = None
     challenges: Optional[str] = None
-    # --- END NEW FIELDS ---
+    lead_type: Optional[str] = None
 
 class LeadCreate(LeadBase):
     created_by: str
-    assigned_to: Optional[str]  # FK to users.id
+    assigned_to: Optional[str]
+
 class LeadOut(LeadBase):
     id: int
     status: str
     created_at: datetime
     assigned_to: Optional[str]
     model_config = ConfigDict(from_attributes=True)
-class LeadUpdate(BaseModel):
-    status: Optional[str]
+
+class LeadUpdateWeb(BaseModel):
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    team_size: Optional[Union[str, int]] = None
+    source: Optional[str] = None
+    segment: Optional[str] = None
     remark: Optional[str] = None
-    assigned_to: Optional[int]
+    product: Optional[str] = None
+    phone_2: Optional[str] = None
+    turnover: Optional[str] = None
+    current_system: Optional[str] = None
+    machine_specification: Optional[str] = None
+    challenges: Optional[str] = None
+    lead_type: Optional[str] = None
+    assigned_to: Optional[str] = None
+    status: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
 
 class LeadResponse(BaseModel):
     id: int
@@ -51,26 +105,16 @@ class LeadResponse(BaseModel):
     assigned_to: str
     created_by: str
     created_at: datetime
-    updated_at: Optional[datetime] = None
-    
-    # --- NEW OPTIONAL FIELDS ---
-    phone_2: Optional[str] = None
-    turnover: Optional[str] = None
-    current_system: Optional[str] = None
-    machine_specification: Optional[str] = None
-    challenges: Optional[str] = None
-    # --- END NEW FIELDS ---
+    updated_at: Optional[datetime]
+    phone_2: Optional[str]
+    turnover: Optional[str]
+    current_system: Optional[str]
+    machine_specification: Optional[str]
+    challenges: Optional[str]
+    lead_type: Optional[str]
+    model_config = ConfigDict(from_attributes=True)
 
 # ---------------- TASK SCHEMAS ----------------
-class TaskBase(BaseModel):
-    lead_id: int
-    assigned_to: str
-    task_type: str
-    date_time: datetime
-    remark: Optional[str] = None
-class TaskCreate(TaskBase):
-    pass
-
 class TaskOut(BaseModel):
     id: int
     lead_id: int
@@ -78,111 +122,93 @@ class TaskOut(BaseModel):
     event_type: str
     event_time: datetime
     remark: str | None = None
-
-    class Config:
-        orm_mode = True
-# ---------------- USER SCHEMAS ----------------
-class UserBase(BaseModel):
-    username: str
-    usernumber: str
-    department: Optional[str] = None
-class UserCreate(BaseModel):
-    username: str
-    usernumber: str
-    email: Optional[str] = None
-    department: Optional[str] = None
-    password: str
-
-class UserLogin(BaseModel):
-    username: str
-    password: str
-
-class UserResponse(BaseModel):
-    id: int
-    username: str
-    usernumber: str
-    email: Optional[str] = None 
-    department: Optional[str]
-
-    class Config:
-        orm_mode = True
-
-class UserOut(UserBase):
-    id: int
-    created_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
 # ---------------- EVENT SCHEMAS ----------------
 class EventBase(BaseModel):
     lead_id: int
     assigned_to: str
     event_type: str
     event_time: datetime
+    event_end_time: Optional[datetime] = None
     created_by: str
     remark: Optional[str] = None
+
 class EventCreate(EventBase):
     pass
+
 class EventOut(EventBase):
     id: int
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
-# ---------------- FEEDBACK SCHEMAS ----------------
-class FeedbackBase(BaseModel):
-    lead_id: int
-    feedback_by: str
-    content: str
-class FeedbackCreate(FeedbackBase):
-    pass
-class FeedbackOut(FeedbackBase):
+
+# ---------------- DEMO SCHEMAS ----------------
+class DemoOut(BaseModel):
     id: int
+    lead_id: int
+    scheduled_by: str
+    assigned_to: str
+    start_time: datetime
+    event_end_time: Optional[datetime]
+    phase: str
+    remark: Optional[str]
     created_at: datetime
+    updated_at: Optional[datetime]
     model_config = ConfigDict(from_attributes=True)
-# ---------------- REMINDER SCHEMAS ----------------
 
+# ---------------- WEB FORM SCHEMAS ----------------
+class MeetingScheduleWeb(BaseModel):
+    lead_id: int
+    assigned_to_user_id: int
+    start_time: datetime
+    end_time: datetime
+    created_by_user_id: int
 
-class ReminderBase(BaseModel):
+class PostMeetingWeb(BaseModel):
+    meeting_id: int
+    notes: str
+    updated_by: str
+
+class DemoScheduleWeb(BaseModel):
+    lead_id: int
+    assigned_to_user_id: int
+    start_time: datetime
+    end_time: datetime
+    created_by_user_id: int
+
+class PostDemoWeb(BaseModel):
+    demo_id: int
+    notes: str
+    updated_by: str
+
+# ---------------- OTHER SCHEMAS ----------------
+class ReminderCreate(BaseModel):
     lead_id: int
     remind_time: datetime
     message: str
     assigned_to: str
-class ReminderCreate(ReminderBase):
-    user_id: int  # required for FK to users.id
-class ReminderOut(ReminderBase):
-    id: int
-    status: str
-    created_at: datetime
-    model_config = ConfigDict(from_attributes=True)
-    
-# ---------------- ACTIVITY LOG SCHEMAS ----------------
-class ActivityLogBase(BaseModel):
+    user_id: int
+
+class ActivityLogCreate(BaseModel):
     lead_id: int
     details: str
-
-class ActivityLogCreate(ActivityLogBase):
     phase: str
 
-class ActivityLogOut(ActivityLogBase):
+class ActivityLogOut(BaseModel):
     id: int
+    lead_id: int
     phase: str
+    details: str
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
-# --- NEW SCHEMA FOR UNIFIED LEAD HISTORY ---
 class HistoryItemOut(BaseModel):
     timestamp: datetime
-    event_type: str  # e.g., "Creation", "Status Change", "Activity", "Reassignment"
+    event_type: str
     details: str
     user: str
 
-
-class AssignmentLogBase(BaseModel):
+class AssignmentLogCreate(BaseModel):
     lead_id: int
     assigned_to: str
     assigned_by: str
-
-class AssignmentLogCreate(AssignmentLogBase):
-    pass
-
-class AssignmentLogOut(AssignmentLogBase):
-    id: int
-    assigned_at: datetime
-    model_config = ConfigDict(from_attributes=True)

@@ -1,5 +1,4 @@
 # app/reminders.py
-
 from datetime import datetime
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
@@ -14,7 +13,7 @@ logger = logging.getLogger(__name__)
 def schedule_reminder(
     db: Session,
     lead_id: int,
-    user_id: int, # It's better to use user_id for clarity
+    user_id: int, 
     message: str,
     remind_at: datetime,
 ):
@@ -42,9 +41,10 @@ async def reminder_loop():
         # Use a new session for each check to avoid stale session issues.
         db = SessionLocal()
         try:
-            now = datetime.now()
+            # --- CRITICAL FIX: Use utcnow() to compare against UTC timestamps ---
+            now = datetime.utcnow()
             
-            # --- CRITICAL FIX: The query now joins Reminder with User to get the phone number ---
+            # The query now joins Reminder with User to get the phone number
             due_reminders_with_users = (
                 db.query(Reminder, User.usernumber)
                 .join(User, Reminder.user_id == User.id)
@@ -63,6 +63,7 @@ async def reminder_loop():
                         continue
 
                     # Send the WhatsApp message to the fetched user_phone
+                    # Assuming you have a default reply_url for system-initiated messages
                     success = send_whatsapp_message(None, user_phone, f"⏰ Reminder: {reminder.message}")
                     
                     if success:
@@ -84,5 +85,5 @@ async def reminder_loop():
         finally:
             db.close() # Always close the session
 
-        # --- CORRECTED: Sleep for 60 seconds (1 minute) between checks ---
+        # Sleep for 60 seconds (1 minute) between checks
         await asyncio.sleep(60)

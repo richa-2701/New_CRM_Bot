@@ -5,7 +5,10 @@ from app.message_sender import send_whatsapp_message
 from app.crud import save_lead, update_lead_status
 from app.schemas import LeadCreate
 import re
-from app.webhook import router as webhook_router
+# --- THIS IS THE CORRECTED LINE ---
+# We now only import the routers that are actually defined in webhook.py
+from app.webhook import main_router, web_router
+# --- END CORRECTION ---
 from app.reminders import reminder_loop
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,17 +18,29 @@ app = FastAPI(
     description="Handles incoming WhatsApp messages and processes CRM actions",
     version="1.0.0"
 )
-router = APIRouter()
-app.include_router(webhook_router)
-app.include_router(router)
 
+# Add the CORS Middleware FIRST.
+origins = [
+"http://localhost:3000",
+"http://192.168.1.62:3000",
+"https://9f7cb36b5732.ngrok-free.app", # Your Ngrok URL
+]
 app.add_middleware(
     CORSMiddleware,
+    # Using ["*"] is the most flexible for development with changing Ngrok URLs
     allow_origins=["*"],
     allow_credentials=True,
+    # Use ["*"] to allow all methods (POST, GET, OPTIONS, etc.)
+    # and all headers (Content-Type, Authorization, etc.)
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# --- CORRECTED: Include the correctly imported routers ---
+# This includes routes like /login, /register, /webhook, etc.
+app.include_router(main_router)
+# This includes all routes prefixed with /web for the frontend
+app.include_router(web_router, prefix="/web", tags=["Web Application"])
+
 
 @app.on_event("startup")
 async def start_background_tasks():
@@ -35,33 +50,13 @@ async def start_background_tasks():
     print("🚀 Starting background task for reminders...")
     asyncio.create_task(reminder_loop())
 
-@router.get("/ping")
+@app.get("/ping", tags=["Health"])
 async def ping():
-    return {"status": "✅ Webhook is alive"}
+    """A simple endpoint to check if the API is alive."""
+    return {"status": "✅ API is alive"}
 
 
-@router.post("/test-app", tags=["Test"])
-async def test_app_message():
-    """
-    Test endpoint to verify app message handling works correctly
-    """
-    from app.handlers.message_router import route_message
-    
-    # Test data
-    test_message = "ABC Corp, John Doe, 9876543210, referral, assign to Banwari"
-    test_phone = "9876543210"
-    
-    # Route the message with app source
-    response = await route_message(test_phone, test_message, "", "app")
-    
-    return {
-        "test_input": {
-            "message": test_message,
-            "phone": test_phone,
-            "source": "app"
-        },
-        "response": response
-    }
+
 
 def extract_company_name(text: str) -> str:
     match = re.search(r"(?:for|with)\s+(.*?)\s+(?:on|at|with|and|is|\.|,|$)", text, re.IGNORECASE)

@@ -13,7 +13,7 @@ def parse_reassignment_message(msg_text: str) -> tuple[str | None, str | None]:
     Parses messages like "reassign [Company Name] to [Assignee Name/Phone]"
     """
     msg_text = msg_text.strip()
-    match = re.search(r"reassign\s+(.*?)\s+to\s+(.*)", msg_text, re.IGNORECASE)
+    match = re.search(r"reassign\s+(.+?)\s+to\s+(.+)", msg_text, re.IGNORECASE)
     if match:
         company_raw = match.group(1).strip()
         assignee_raw = match.group(2).strip()
@@ -56,7 +56,7 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
         assignment_log_data = AssignmentLogCreate(
             lead_id=lead.id,
             assigned_to=assignee.username,
-            assigned_by=sender
+            assigned_by=str(sender)
         )
         create_assignment_log(db, log=assignment_log_data)
 
