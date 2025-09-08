@@ -8,7 +8,7 @@ from app.crud import (
     save_lead
 )
 from app.message_sender import send_whatsapp_message, send_message, format_phone
-from app.schemas import LeadCreate
+from app.schemas import LeadCreate, ContactCreate
 from app.gpt_parser import parse_lead_info, parse_update_fields
 from app.temp_store import temp_store
 
@@ -31,14 +31,21 @@ async def handle_new_lead(db: Session, message_text: str, created_by: str, reply
         if existing:
             return send_message(reply_url, created_by, f"⚠️ Lead for '{parsed_data['company_name']}' already exists.", source)
 
+        # --- CHANGE 2: Construct the data in the new, correct format ---
+        # First, create the contact object
+        contact_payload = ContactCreate(
+            contact_name=parsed_data.get("contact_name"),
+            phone=parsed_data.get("phone"),
+            email=parsed_data.get("email") # This will be None if not found, which is correct
+        )
+
+        # Now, create the lead object, embedding the contact inside the 'contacts' list
         lead_data_for_creation = LeadCreate(
             company_name=parsed_data.get("company_name"),
             source=parsed_data.get("source", "whatsapp"),
             created_by=str(created_by),
             assigned_to=parsed_data.get("assigned_to"),
-            initial_contact_name=parsed_data.get("contact_name"),
-            initial_contact_phone=parsed_data.get("phone"),
-            initial_contact_email=parsed_data.get("email"),
+            contacts=[contact_payload], # Pass the contact payload inside a list
             email=parsed_data.get("email"),
             address=parsed_data.get("address"),
             team_size=parsed_data.get("team_size"),
@@ -52,6 +59,7 @@ async def handle_new_lead(db: Session, message_text: str, created_by: str, reply
             challenges=parsed_data.get("challenges"),
             lead_type=parsed_data.get("lead_type")
         )
+        # 
 
         # Call the corrected `save_lead` function which now only takes one argument.
         created_lead = save_lead(

@@ -104,7 +104,6 @@ async def drip_campaign_loop():
             for assignment in active_assignments:
                 days_passed = (today - assignment.start_date).days
                 
-                # Ensure lead and contacts are loaded
                 if not assignment.lead or not assignment.lead.contacts:
                     logger.warning(f"Skipping drip assignment {assignment.id} for lead {assignment.lead_id} due to missing data.")
                     continue
@@ -118,18 +117,17 @@ async def drip_campaign_loop():
 
                 for step in steps_to_process:
                     try:
-                        # Parse the scheduled time from the step
-                        scheduled_time = time.fromisoformat(step.time_to_send)
+                        # --- THIS IS THE CORRECTED LINE ---
+                        # Ensure the value is a string before parsing.
+                        scheduled_time = time.fromisoformat(str(step.time_to_send))
                         
-                        # Check if it's time to send (or if it's a past-due message for today)
                         if step.day_to_send < days_passed or (step.day_to_send == days_passed and now >= scheduled_time):
                             message_content = step.message.message_content
                             
-                            # Get the primary contact's phone number
                             primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
                             if primary_contact and message_content:
                                 success = send_whatsapp_message(
-                                    reply_url=None, # System-initiated message
+                                    reply_url=None,
                                     number=primary_contact.phone,
                                     message=message_content
                                 )

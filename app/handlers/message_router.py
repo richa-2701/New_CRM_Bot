@@ -14,14 +14,12 @@ from app.handlers import (
     reassignment_handler,
     reminder_handler,
     activity_handler,
-    # --- THIS IS THE CORRECTED LINE ---
-    # Add the new discussion_handler to the list of imports
     discussion_handler,
-    # --- END CORRECTION ---
 )
 from app.temp_store import temp_store
 from app.handlers.qualification_handler import pending_context
 from datetime import datetime
+from app.handlers import reminder_handler
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +41,7 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
     lowered_text = message_text.lower().strip()
 
     try:
+        context = qualification_handler.pending_context.get(sender)
         if sender in pending_context:
             context = pending_context[sender]
             logger.info(f"Found pending context for {sender}: {context}")
@@ -82,29 +81,30 @@ async def route_message(sender: str, message_text: str, reply_url: str,source: s
             )
             return send_message(reply_url, sender, polite_msg, source)
         
-        # --- THIS IS THE CORRECTED CODE BLOCK ---
-        # Added the new routing logic for discussion management.
-        # The router will now check for these specific keywords.
 
         if "discussion done for" in lowered_text:
             return await discussion_handler.handle_discussion_done(db, message_text, sender, reply_url, source)
         
-        elif "schedule discussion for" in lowered_text:
-            return await discussion_handler.handle_schedule_discussion(db, message_text, sender, reply_url, source)
+        elif intent == "reminder": # This will now correctly handle our scheduled activities
+            return await reminder_handler.handle_set_reminder(db, message_text, sender, reply_url, source)
 
-        elif "log discussion for" in lowered_text:
-            return await discussion_handler.handle_log_discussion(db, message_text, sender, reply_url, source)
-            
-        # --- END CORRECTION ---
+        if "discussion done for" in lowered_text:
+            return await discussion_handler.handle_discussion_done(db, message_text, sender, reply_url, source)
 
-        elif "add activity for" in lowered_text:
-            return await activity_handler.handle_add_activity(db, message_text, sender, reply_url, source)
+        elif intent == "reminder" or "add activity for" in lowered_text:
+            return await reminder_handler.handle_set_reminder(db, message_text, sender, reply_url, source)
         
         elif intent == "new_lead":
             return await lead_handler.handle_new_lead(db=db, message_text=message_text, created_by=sender, reply_url=reply_url, source=source)
 
         elif intent == "qualify_lead":
             return await qualification_handler.handle_qualification(db=db, msg_text=message_text, sender=sender, reply_url=reply_url, source=source)
+
+        elif intent == "unqualify_lead":
+            return await qualification_handler.handle_unqualification(db, message_text, sender, reply_url, source, status="unqualified")
+            
+        elif intent == "not_our_segment":
+            return await qualification_handler.handle_unqualification(db, message_text, sender, reply_url, source, status="not_our_segment")
 
         elif "reschedule meeting" in lowered_text:
             return await meeting_handler.handle_reschedule_meeting(db, message_text, sender, reply_url, source)

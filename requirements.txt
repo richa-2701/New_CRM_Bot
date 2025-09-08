@@ -8,3 +8,6 @@ pyodbc
 apscheduler>=3.10.1
 dateparser
 pandas openpyxl
+multipart
+httpx
+  

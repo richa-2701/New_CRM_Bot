@@ -5,8 +5,8 @@ from datetime import datetime, time
 
 # ---------------- CONTACT SCHEMAS ----------------
 class ContactBase(BaseModel):
-    contact_name: str
-    phone: str
+    contact_name: Optional[str] = None
+    phone: Optional[str] = None
     email: Optional[str] = None
     designation: Optional[str] = None
 
@@ -57,11 +57,33 @@ class UserResponse(BaseModel):
     updated_at: Optional[datetime]
     model_config = ConfigDict(from_attributes=True)
 
+
+class ActivityLogCreate(BaseModel):
+    lead_id: int
+    details: str
+    phase: str
+    activity_type: str = "Call"
+
+class ActivityLogOut(BaseModel):
+    id: int
+    lead_id: int
+    phase: str
+    details: str
+    attachment_path: Optional[str] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ---------------- LEAD SCHEMAS ----------------
 class LeadBase(BaseModel):
     company_name: str
     email: Optional[str] = None
     address: Optional[str] = None
+    address_2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    country: Optional[str] = None
     team_size: Optional[Union[str, int]] = None
     source: str
     segment: Optional[str] = None
@@ -79,8 +101,6 @@ class LeadCreate(LeadBase):
     assigned_to: str
     contacts: List[ContactCreate] 
 
-# --- THIS IS THE CORRECTED AND FINAL LeadResponse SCHEMA ---
-# It now correctly inherits from LeadBase and has only one model_config.
 class LeadResponse(LeadBase):
     id: int
     status: Optional[str]
@@ -88,11 +108,9 @@ class LeadResponse(LeadBase):
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime]
-    
-    # This is the new field to include all associated contacts.
     contacts: List[ContactOut] = []
     
-    # This configuration must be defined only once, at the end.
+    last_activity: Optional[ActivityLogOut] = None
     model_config = ConfigDict(from_attributes=True)
 # --- END CORRECTION ---
 
@@ -100,6 +118,11 @@ class LeadUpdateWeb(BaseModel):
     company_name: Optional[str] = None
     email: Optional[str] = None
     address: Optional[str] = None
+    address_2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    country: Optional[str] = None
     team_size: Optional[Union[str, int]] = None
     source: Optional[str] = None
     segment: Optional[str] = None
@@ -114,6 +137,9 @@ class LeadUpdateWeb(BaseModel):
     assigned_to: Optional[str] = None
     status: Optional[str] = None
     contacts: List[ContactUpdate] = []
+    activity_type: Optional[str] = None
+    activity_details: Optional[str] = None
+    
     model_config = ConfigDict(from_attributes=True)
 
 # ---------------- TASK SCHEMAS ----------------
@@ -135,6 +161,7 @@ class EventBase(BaseModel):
     event_end_time: Optional[datetime] = None
     created_by: str
     remark: Optional[str] = None
+    phase: Optional[str] = None
 
 class EventCreate(EventBase):
     pass
@@ -190,20 +217,9 @@ class ReminderCreate(BaseModel):
     message: str
     assigned_to: str
     user_id: int
+    activity_type: Optional[str] = "Follow-up"
 
-class ActivityLogCreate(BaseModel):
-    lead_id: int
-    details: str
-    phase: str
 
-class ActivityLogOut(BaseModel):
-    id: int
-    lead_id: int
-    phase: str
-    details: str
-    attachment_path: Optional[str] = None
-    created_at: datetime
-    model_config = ConfigDict(from_attributes=True)
 
 class HistoryItemOut(BaseModel):
     timestamp: datetime
@@ -286,3 +302,54 @@ class ReminderOut(BaseModel):
     created_at: datetime
     # --- ADD THIS LINE ---
     model_config = ConfigDict(from_attributes=True)
+
+class MarkActivityDonePayload(BaseModel):
+    notes: str
+    updated_by: str
+
+class UnifiedActivityOut(BaseModel):
+    id: int
+    type: str  # 'log' or 'reminder'
+    lead_id: int
+    company_name: str
+    activity_type: str
+    details: str
+    status: str
+    created_at: datetime
+    scheduled_for: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class StatusMessage(BaseModel):
+    """A generic response model for success/error messages."""
+    status: str
+    message: str
+
+class ScheduleActivityWeb(BaseModel):
+    lead_id: int
+    details: str
+    activity_type: str
+    created_by_user_id: int
+
+class EventReschedulePayload(BaseModel):
+    start_time: datetime
+    end_time: datetime
+    updated_by: str
+
+class EventReassignPayload(BaseModel):
+    assigned_to_user_id: int
+    updated_by: str
+
+class EventCancelPayload(BaseModel):
+    reason: str
+    updated_by: str
+
+class EventNotesUpdatePayload(BaseModel):
+    notes: str
+    updated_by: str
+
+# --- NEW: Schema for Activity Log Update ---
+
+class ActivityLogUpdate(BaseModel):
+    details: str
+    activity_type: Optional[str] = None

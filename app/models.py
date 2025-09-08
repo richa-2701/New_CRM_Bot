@@ -34,12 +34,10 @@ class Contact(Base):
     __tablename__ = "contacts"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
-    contact_name = Column(String, nullable=False)
-    phone = Column(String, nullable=False)
+    contact_name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
     designation = Column(String, nullable=True) # e.g., "Manager", "IT Head"
-    
-    # This creates the link back to the Lead model
     lead = relationship("Lead", back_populates="contacts")
 
 class Lead(Base):
@@ -51,6 +49,11 @@ class Lead(Base):
     assigned_to = Column(String, ForeignKey("users.username"), nullable=False)
     email = Column(String, nullable=True)
     address = Column(String, nullable=True)
+    address_2 = Column(String, nullable=True) # New Field
+    city = Column(String, nullable=True) # New Field
+    state = Column(String, nullable=True) # New Field
+    pincode = Column(String, nullable=True) # New Field
+    country = Column(String, nullable=True) # New Field
     segment = Column(String, nullable=True)
     team_size = Column(String, nullable=True)
     remark = Column(Text, nullable=True)
@@ -81,6 +84,7 @@ class ActivityLog(Base):
     __tablename__ = "activity_logs"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    activity_type = Column(String, nullable=False, default="Call")  
     phase = Column(String, nullable=False)
     details = Column(Text, nullable=False)
     attachment_path = Column(String, nullable=True)
@@ -118,6 +122,7 @@ class Reminder(Base):
     lead_id = Column(Integer, ForeignKey("leads.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
     remind_time = Column(DateTime)
+    activity_type = Column(String, default="Follow-up")
     message = Column(String)
     assigned_to = Column(String)
     status = Column(String, default="pending")

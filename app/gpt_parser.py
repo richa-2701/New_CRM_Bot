@@ -5,6 +5,8 @@ import json
 import re
 import logging
 from dotenv import load_dotenv
+import dateparser
+from datetime import datetime, timedelta
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -287,28 +289,51 @@ User Message:
 
 def parse_update_company(message: str) -> str:
     """
-    Extracts the company name from messages like "Lead qualified for Parksons" or just "Parksons".
+    Extracts the company name from various message formats by checking patterns.
+    - "Lead for [Company Name] is not qualified"
+    - "Qualified for [Company Name]"
+    - "[Company Name] is not our segment"
+    - "[Company Name]"
     """
     msg = message.strip()
     lowered_msg = msg.lower()
 
-    # Pattern to find company name after keywords like 'for' or 'is'
-    match = re.search(r"(?:qualified\s+for|company\s+is|for)\s+(.+)", lowered_msg)
+    # Pattern 1: Catches "for [Company Name] is ...". Non-greedy.
+    match = re.search(r"for\s+(.*?)\s+is", lowered_msg)
     if match:
-        # Use .title() to properly capitalize company names like "Parksons"
-        return match.group(1).strip().title()
+        company_name = match.group(1).strip()
+        if company_name:
+            return company_name.title()
 
-    # If no pattern matches, and the message is short, assume the whole message is the company name.
-    # This is crucial for handling the follow-up case where the user just sends "Parksons".
-    keywords_to_avoid = [
-        "lead", "qualified", "demo", "meeting", "update", "schedule", "new", "reminder", "done"
+    # Pattern 2: Catches "... for [Company Name]" where the name is at the end.
+    match = re.search(r"for\s+(.+)", lowered_msg)
+    if match:
+        company_name = match.group(1).strip()
+        if company_name:
+            return company_name.title()
+
+    # Pattern 3: Catches "[Company Name] is not qualified", etc.
+    status_keywords = [
+        "is not qualified", "not qualified", "is qualified", "qualified",
+        "is not our segment", "not our segment"
     ]
-    # Check if the message is short (e.g., up to 5 words) and doesn't contain common command keywords.
-    if 1 <= len(msg.split()) <= 5 and not any(word in lowered_msg for word in keywords_to_avoid):
+    for keyword in status_keywords:
+        # We check if the message ENDS with the keyword to be more specific
+        if lowered_msg.endswith(keyword):
+            company_name = lowered_msg[:-len(keyword)].strip()
+            if company_name:
+                return company_name.title()
+
+    # Fallback for when the user just provides the company name
+    keywords_to_avoid = [
+        "lead", "qualified", "demo", "meeting", "update", "schedule", "new",
+        "reminder", "done", "not", "our", "segment", "is", "for"
+    ]
+    words_in_message = lowered_msg.split()
+    if 1 <= len(words_in_message) <= 5 and not any(word in words_in_message for word in keywords_to_avoid):
         return msg.title()
 
     return ""
-
 
 def parse_intent_and_fields(message: str):
     """
@@ -319,6 +344,12 @@ def parse_intent_and_fields(message: str):
     if re.search(r"meeting (is )?done", lowered):
         # Make "meeting done" more specific to avoid conflict with feedback
         return "meeting_done", {}
+    
+    if re.search(r"lead\s+(for|is)\s+.+?\s+is\s+not\s+qualified|not\s+qualified", lowered):
+        return "unqualify_lead", {}
+
+    if re.search(r"not\s+(in|our)\s+our\s+segment|not\s+our\s+segment", lowered):
+        return "not_our_segment", {}
 
     if re.search(r"lead\s+is\s+qualified|qualified\s+for|is\s+qualified|lead qualified", lowered):
         return "qualify_lead", {}
@@ -340,3 +371,38 @@ def parse_intent_and_fields(message: str):
         return "demo_done", {}
 
     return "unknown", {}
+
+def parse_datetime_from_text(text: str) -> datetime:
+    """
+    Parses a natural language string to find a date and time.
+    This version first tries to extract a specific date/time phrase from the text
+    before passing it to the dateparser library for robust parsing.
+    """
+    
+    # --- STEP 1: Use regex to find and isolate the date/time part of the string ---
+    # This pattern looks for phrases like "on [date] at [time]", "at [time] on [date]", "tomorrow at 5pm", etc.
+    # It helps remove confusing words like "follow up".
+    match = re.search(r'(on\s|at\s|tomorrow|today|next\sweek)[\w\s:/]+', text, re.IGNORECASE)
+    
+    datetime_string_to_parse = text # Default to the full string
+    if match:
+        # If we found a specific phrase, use that for parsing.
+        datetime_string_to_parse = match.group(0)
+        logger.info(f"🔍 Extracted datetime phrase: '{datetime_string_to_parse}'")
+
+    # --- STEP 2: Configure and run the dateparser ---
+    settings = {
+        'DATE_ORDER': 'DMY',
+        'PREFER_DATES_FROM': 'future',
+        'RELATIVE_BASE': datetime.now()
+    }
+    
+    parsed_date = dateparser.parse(datetime_string_to_parse, settings=settings)
+
+    if parsed_date:
+        logger.info(f"📅 Parsed '{datetime_string_to_parse}' into datetime: {parsed_date}")
+        return parsed_date
+    else:
+        logger.warning(f"⚠️ Could not parse datetime from '{text}'. Defaulting to tomorrow at 12 PM.")
+        tomorrow = datetime.now() + timedelta(days=1)
+        return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0)
