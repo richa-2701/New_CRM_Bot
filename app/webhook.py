@@ -14,7 +14,7 @@ from countryinfo import CountryInfo
 import io
 from typing import Optional, List
 from app import models
-from app.models import Lead, Event, Demo
+from app.models import Lead, Event, Demo, Reminder
 from app.schemas import (
     LeadResponse, ScheduleActivityWeb, ReminderCreate, UserCreate, UserLogin, UserResponse, TaskOut,
     ActivityLogOut, HistoryItemOut, UserPasswordChange, EventOut,ActivityLogCreate,
@@ -986,8 +986,26 @@ def api_delete_activity(activity_id: int, db: Session = Depends(get_db)):
 
 @web_router.delete("/activities/scheduled/{reminder_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Activities"])
 def api_cancel_scheduled_activity(reminder_id: int, db: Session = Depends(get_db)):
+    # Find the original reminder
+    reminder = db.query(Reminder).filter(Reminder.id == reminder_id, Reminder.status == 'pending').first()
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Pending reminder not found.")
+
+    # Create a new activity log for the cancellation
+    cancellation_log = ActivityLogCreate(
+        lead_id=reminder.lead_id,
+        details=f"Canceled scheduled activity: {reminder.message}",
+        phase="Canceled", # This new status will be displayed on the frontend
+        activity_type=reminder.activity_type
+    )
+    create_activity_log(db, cancellation_log)
+
+    # Now, delete the original reminder
     success = delete_reminder(db, reminder_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Pending reminder not found.")
+        # This case is unlikely if the first query succeeds, but it's good practice
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to cancel the activity.")
+    
+    db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
