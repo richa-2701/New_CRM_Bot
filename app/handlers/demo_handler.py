@@ -1,4 +1,4 @@
-#app/handlers/demo_handler.py
+# demo_handler
 import re
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
@@ -7,7 +7,6 @@ import logging
 
 from app.models import Event, Lead, Demo, Feedback, Reminder, User
 from app.message_sender import send_message, send_whatsapp_message
-# --- MODIFIED: Import is_user_available and create_reminder ---
 from app.crud import get_user_by_phone, get_user_by_name, get_lead_by_company, update_lead_status, create_activity_log, is_user_available, create_reminder
 from app.schemas import ActivityLogCreate, ReminderCreate
 
@@ -54,8 +53,9 @@ def extract_datetime(text: str) -> datetime:
     if date_match:
         raw_date_string = date_match.group(1).strip()
         raw_date_string = re.split(r'\s+assigned\s+to', raw_date_string, flags=re.IGNORECASE)[0]
-        parsed = dateparser.parse(raw_date_string, settings={"PREFER_DATES_FROM": "future", "DATE_ORDER": "DMY"})
-        if parsed and parsed > datetime.utcnow():
+        # --- FIX APPLIED: Removed 'PREFER_DATES_FROM': 'future' for accurate parsing ---
+        parsed = dateparser.parse(raw_date_string, settings={"DATE_ORDER": "DMY"})
+        if parsed and parsed > datetime.utcnow(): # Explicitly check for future date
             return parsed
     return None
 
@@ -72,7 +72,7 @@ async def handle_demo_schedule(db: Session, message_text: str, sender: str, repl
         company_name, assigned_to_name, demo_time_str = extract_details_for_demo(message_text)
 
         if not company_name or not demo_time_str:
-            return send_message(reply_url, sender, "⚠️ Invalid format. Use: `Schedule demo for [Company] on [Date]`", source)
+            return send_message(number=sender, message="⚠️ Invalid format. Use: `Schedule demo for [Company] on [Date]`", source=source)
 
         start_time = None
         end_time = None
@@ -81,36 +81,32 @@ async def handle_demo_schedule(db: Session, message_text: str, sender: str, repl
         if time_range_match:
             start_str = time_range_match.group(1).strip()
             end_str = time_range_match.group(2).strip()
-            # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
             start_time = dateparser.parse(start_str, settings={'DATE_ORDER': 'DMY'})
             end_time = dateparser.parse(end_str, settings={'DATE_ORDER': 'DMY'})
             
-            if start_time and end_time and end_time.date() == datetime.utcnow().date():
+            if start_time and end_time and end_time.date() == start_time.date():
                  end_time = end_time.replace(year=start_time.year, month=start_time.month, day=start_time.day)
         
         if not start_time or not end_time:
-            # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
             start_time = dateparser.parse(demo_time_str, settings={'DATE_ORDER': 'DMY'})
             if start_time:
                 end_time = start_time + timedelta(minutes=DEMO_DEFAULT_DURATION_MINUTES)
         
         if not start_time:
-            return send_message(reply_url, sender, f"⚠️ Could not find a valid date/time in '{demo_time_str}'.", source)
+            return send_message(number=sender, message=f"⚠️ Could not find a valid date/time in '{demo_time_str}'.", source=source)
         
-        # Perform the check immediately after parsing.
         if start_time < datetime.utcnow():
             error_msg = f"❌ The start time you entered ({start_time.strftime('%d-%b-%Y %I:%M %p')}) is in the past. Please use a future date."
-            return send_message(reply_url, sender, error_msg, source)
-        # --- END OF FIX ---
+            return send_message(number=sender, message=error_msg, source=source)
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            return send_message(reply_url, sender, f"❌ Could not find lead with company: {company_name}", source)
+            return send_message(number=sender, message=f"❌ Could not find lead with company: {company_name}", source=source)
 
         assignee_user = get_user_by_name(db, assigned_to_name) if assigned_to_name else get_user_by_name(db, lead.assigned_to)
         if not assignee_user:
             assignee_name_to_show = assigned_to_name or lead.assigned_to
-            return send_message(reply_url, sender, f"❌ Could not find an assignee named '{assignee_name_to_show}'.", source)
+            return send_message(number=sender, message=f"❌ Could not find an assignee named '{assignee_name_to_show}'.", source=source)
 
         assignee_phone = assignee_user.usernumber
         assignee_name = assignee_user.username
@@ -126,7 +122,7 @@ async def handle_demo_schedule(db: Session, message_text: str, sender: str, repl
                 f"Conflict: {conflict_type} with *{conflict_lead_name}*\n"
                 f"Time: {conflict_start_time.strftime('%I:%M %p')}"
             )
-            return send_message(reply_url, sender, error_msg, source)
+            return send_message(number=sender, message=error_msg, source=source)
 
         demo = Demo(
             lead_id=lead.id,
@@ -147,52 +143,60 @@ async def handle_demo_schedule(db: Session, message_text: str, sender: str, repl
         if one_day_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=assignee_user.id, assigned_to=assignee_user.username,
-                remind_time=one_day_before, message=f" (1 day away) {reminder_message}"
+                remind_time=one_day_before, message=f" (1 day away) {reminder_message}",
+                is_hidden_from_activity_log=True
             ))
 
         one_hour_before = start_time - timedelta(hours=1)
         if one_hour_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=assignee_user.id, assigned_to=assignee_user.username,
-                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}"
+                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}",
+                is_hidden_from_activity_log=True
             ))
         
         logger.info(f"Scheduled pre-demo reminders for demo ID {demo.id}")
 
         if assignee_phone and assignee_phone != sender:
+            # --- CRITICAL FIX START ---
+            # Safely get contact name and phone from the lead's contacts list
+            contact_name_for_msg = lead.contacts[0].contact_name if lead.contacts and lead.contacts[0].contact_name else 'N/A'
+            contact_phone_for_msg = lead.contacts[0].phone if lead.contacts and lead.contacts[0].phone else 'N/A'
+
             notification_msg = f"""📢 *You have been assigned a demo*
 
 🏢 Company: {lead.company_name}
-👤 Contact: {lead.contact_name} ({lead.phone})
+👤 Contact: {contact_name_for_msg} ({contact_phone_for_msg})
 🕒 Time: {start_time.strftime('%A, %b %d at %I:%M %p')}"""
-            send_whatsapp_message(reply_url, assignee_phone, notification_msg)
+            # --- CRITICAL FIX END ---
+            send_whatsapp_message(number=assignee_phone, message=notification_msg)
             logger.info(f"Sent demo notification to {assignee_name} at {assignee_phone}")
 
         confirmation_msg = f"✅ Demo scheduled for {company_name} on {start_time.strftime('%A, %b %d at %I:%M %p')}\n👤 Assigned to: {assignee_name}. Reminders have been set."
         
-        return send_message(reply_url, sender, confirmation_msg, source)
+        return send_message(number=sender, message=confirmation_msg, source=source)
     
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Error scheduling demo: {e}", exc_info=True)
-        return send_message(reply_url, sender, "❌ Failed to schedule demo due to an internal error.", source)
+        return send_message(number=sender, message="❌ Failed to schedule demo due to an internal error.", source=source)
 
 async def handle_demo_reschedule(db: Session, message_text: str, sender: str, reply_url: str, source: str = "whatsapp"):
     try:
         reschedule_match = re.search(r"reschedule\s+demo\s+for\s+(.+?)\s+(?:on|at)\s+(.+)", message_text, re.IGNORECASE)
         if not reschedule_match:
-             return send_message(reply_url, sender, "⚠️ Invalid format. Use: `reschedule demo for [Company] on [Date]`", source)
+             return send_message(number=sender, message="⚠️ Invalid format. Use: `reschedule demo for [Company] on [Date]`", source=source)
         
         company_name = reschedule_match.group(1).strip()
         new_time_str = reschedule_match.group(2).strip()
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            return send_message(reply_url, sender, f"❌ No lead found for company '{company_name}'.", source)
+            return send_message(number=sender, message=f"❌ No lead found for company '{company_name}'.", source=source)
 
         demo = db.query(Demo).filter(Demo.lead_id == lead.id).order_by(Demo.start_time.desc()).first()
         if not demo:
-            return send_message(reply_url, sender, f"⚠️ No demo found for '{company_name}'.", source)
+            return send_message(number=sender, message=f"⚠️ No demo found for '{company_name}'.", source=source)
 
         new_start_time = None
         new_end_time = None
@@ -201,26 +205,22 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
         if time_range_match:
             start_str = time_range_match.group(1).strip()
             end_str = time_range_match.group(2).strip()
-            # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
             new_start_time = dateparser.parse(start_str, settings={'DATE_ORDER': 'DMY'})
             new_end_time = dateparser.parse(end_str, settings={'DATE_ORDER': 'DMY'})
-            if new_start_time and new_end_time and new_end_time.date() == datetime.utcnow().date():
+            if new_start_time and new_end_time and new_end_time.date() == new_start_time.date():
                 new_end_time = new_end_time.replace(year=new_start_time.year, month=new_start_time.month, day=new_start_time.day)
         
         if not new_start_time or not new_end_time:
-            # --- THIS IS THE FIX: Remove 'PREFER_DATES_FROM': 'future' ---
             new_start_time = dateparser.parse(new_time_str, settings={'DATE_ORDER': 'DMY'})
             if new_start_time:
                 new_end_time = new_start_time + timedelta(minutes=DEMO_DEFAULT_DURATION_MINUTES)
         
         if not new_start_time:
-            return send_message(reply_url, sender, f"⚠️ Could not find a valid new date/time in '{new_time_str}'.", source)
+            return send_message(number=sender, message=f"⚠️ Could not find a valid new date/time in '{new_time_str}'.", source=source)
         
-        # Perform the check immediately after parsing.
         if new_start_time < datetime.utcnow():
             error_msg = f"❌ The new start time you entered ({new_start_time.strftime('%d-%b-%Y %I:%M %p')}) is in the past. Please use a future date."
-            return send_message(reply_url, sender, error_msg, source)
-        # --- END OF FIX ---
+            return send_message(number=sender, message=error_msg, source=source)
 
         old_time = demo.start_time.strftime('%d %b %Y at %I:%M %p')
         new_time_formatted = new_start_time.strftime('%A, %b %d at %I:%M %p')
@@ -231,7 +231,7 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
 
         if not final_assignee_user:
              logger.error(f"Could not find user for phone number {demo.assigned_to} during reschedule.")
-             return send_message(reply_url, sender, "❌ Internal error: Could not verify assignee.", source)
+             return send_message(number=sender, message="❌ Internal error: Could not verify assignee.", source=source)
 
         assignee_name = final_assignee_user.username
         assignee_phone = final_assignee_user.usernumber
@@ -243,7 +243,7 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
             conflict_lead_name = conflict_lead.company_name if conflict_lead else "another task"
             conflict_start_time = conflict.event_time if isinstance(conflict, Event) else conflict.start_time
             error_msg = f"❌ Rescheduling failed. *{assignee_name}* is already booked at that time.\n\nConflict: {conflict_type} with *{conflict_lead_name}* at {conflict_start_time.strftime('%I:%M %p')}"
-            return send_message(reply_url, sender, error_msg, source)
+            return send_message(number=sender, message=error_msg, source=source)
 
         db.query(Reminder).filter(
             Reminder.lead_id == lead.id, 
@@ -257,14 +257,16 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
         if one_day_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
-                remind_time=one_day_before, message=f" (1 day away) {reminder_message}"
+                remind_time=one_day_before, message=f" (1 day away) {reminder_message}",
+                is_hidden_from_activity_log=True
             ))
 
         one_hour_before = new_start_time - timedelta(hours=1)
         if one_hour_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
-                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}"
+                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}",
+                is_hidden_from_activity_log=True
             ))
         
         logger.info(f"Re-scheduled pre-demo reminders for demo ID {demo.id}")
@@ -284,19 +286,19 @@ async def handle_demo_reschedule(db: Session, message_text: str, sender: str, re
 🏢 Company: {lead.company_name}
 📞 Contact: {lead.phone}
 📅 New Time: {new_time_formatted}"""
-            send_whatsapp_message(reply_url, assignee_phone, notify_msg)
+            send_whatsapp_message(number=assignee_phone, message=notify_msg)
             logger.info(f"Sent reschedule notification to {assignee_name} at {assignee_phone}")
 
         confirmation_msg = f"🔄 Demo for {company_name} was rescheduled to {new_time_formatted}. Reminders have been updated."
         if extract_assignee(message_text, db):
             confirmation_msg += f"\n👤 It is now assigned to: {assignee_name}"
 
-        return send_message(reply_url, sender, confirmation_msg, source)
+        return send_message(number=sender, message=confirmation_msg, source=source)
 
     except Exception as e:
         logger.error(f"❌ Error in demo reschedule: {e}", exc_info=True)
         db.rollback()
-        return send_message(reply_url, sender, "❌ Failed to reschedule demo due to an internal error.", source)
+        return send_message(number=sender, message="❌ Failed to reschedule demo due to an internal error.", source=source)
 
 
 
@@ -304,16 +306,16 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
     try:
         company_name = extract_company_name(message_text)
         if not company_name:
-            return send_message(reply_url, sender, "⚠️ Please include the company name, e.g., 'demo done for [Company]'", source)
+            return send_message(number=sender, message="⚠️ Please include the company name, e.g., 'demo done for [Company]'", source=source)
 
         logger.info(f"Handling post-demo for company: {company_name}")
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            return send_message(reply_url, sender, f"❌ Lead not found for company: {company_name}", source)
+            return send_message(number=sender, message=f"❌ Lead not found for company: {company_name}", source=source)
 
         demo = db.query(Demo).filter(Demo.lead_id == lead.id).order_by(Demo.start_time.desc()).first()
         if not demo:
-             return send_message(reply_url, sender, f"⚠️ No demo record found for '{company_name}'.", source)
+             return send_message(number=sender, message=f"⚠️ No demo record found for '{company_name}'.", source=source)
 
         demo_remark = message_text.strip()
         demo.phase = "Done"
@@ -336,15 +338,16 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
                 remind_time=follow_up_time,
                 message=f"🔔 Follow-up with {company_name} after demo",
                 status="follow up",
-                created_at=datetime.utcnow()
+                created_at=datetime.utcnow(),
+                is_hidden_from_activity_log=False
             )
             db.add(reminder)
             db.commit()
 
         confirmation_msg = f"✅ Marked demo for '{company_name}' as Done and set a 3-day follow-up reminder for the assignee."
-        return send_message(reply_url, sender, confirmation_msg, source)
+        return send_message(number=sender, message=confirmation_msg, source=source)
 
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Error in handle_post_demo: {e}", exc_info=True)
-        return send_message(reply_url, sender, "❌ Failed to update demo status due to an internal error.", source)
+        return send_message(number=sender, message="❌ Failed to update demo status due to an internal error.", source=source)

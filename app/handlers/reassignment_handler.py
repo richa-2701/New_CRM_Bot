@@ -1,4 +1,3 @@
-# app/handlers/reassignment_handler.py
 import logging
 import re
 from sqlalchemy.orm import Session
@@ -29,11 +28,13 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
 
         if not company_name or not new_assignee_input:
             error_msg = "⚠️ Invalid format. Use: `reassign [Company Name] to [New Assignee]`"
-            return send_message(reply_url, sender, error_msg, source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=error_msg, source=source)
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
-            return send_message(reply_url, sender, f"❌ No lead found with company: {company_name}", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=f"❌ No lead found with company: {company_name}", source=source)
 
         assignee = None
         if new_assignee_input.isdigit():
@@ -42,13 +43,15 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
             assignee = get_user_by_name(db, new_assignee_input)
 
         if not assignee:
-            return send_message(reply_url, sender, f"❌ Couldn't find user: {new_assignee_input}", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=f"❌ Couldn't find user: {new_assignee_input}", source=source)
 
         old_assignee = lead.assigned_to
         
         # Prevent reassigning to the same person
         if old_assignee.lower() == assignee.username.lower():
-            return send_message(reply_url, sender, f"✅ Lead '{company_name}' is already assigned to {assignee.username}.", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=f"✅ Lead '{company_name}' is already assigned to {assignee.username}.", source=source)
 
         lead.assigned_to = assignee.username
         db.commit()
@@ -75,13 +78,16 @@ async def handle_reassignment(db: Session, message_text: str, sender: str, reply
                 f"📊 Status: {lead.status or 'N/A'}\n"
                 f"🔄 Assigned By: {sender}"
             )
-            send_whatsapp_message(reply_url, format_phone(assignee.usernumber), notification_msg)
+            # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
+            send_whatsapp_message(number=format_phone(assignee.usernumber), message=notification_msg)
             logger.info(f"Sent reassignment notification to {assignee.username} at {assignee.usernumber}")
 
         # 2. Confirmation for the Original User (handles both app and WhatsApp)
         confirmation_msg = f"✅ Lead '{company_name}' has been successfully reassigned to {assignee.username}."
-        return send_message(reply_url, sender, confirmation_msg, source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=confirmation_msg, source=source)
 
     except Exception as e:
         logger.error("❌ Error in handle_reassignment: %s", str(e), exc_info=True)
-        return send_message(reply_url, sender, "❌ An internal error occurred while reassigning the lead.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="❌ An internal error occurred while reassigning the lead.", source=source)

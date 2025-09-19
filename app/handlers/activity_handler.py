@@ -1,5 +1,4 @@
-# app/handlers/activity_handler.py
-
+# activity_handler
 import re
 import logging
 from sqlalchemy.orm import Session
@@ -33,12 +32,14 @@ async def handle_add_activity(db: Session, msg_text: str, sender: str, reply_url
 
         if not company_name or not details:
             error_msg = "⚠️ Invalid format. Please use:\n`add activity for [Company Name], [your activity details]`"
-            return send_message(reply_url, sender, error_msg, source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=error_msg, source=source)
 
         lead = get_lead_by_company(db, company_name)
         if not lead:
             error_msg = f"❌ Could not find a lead for the company: '{company_name}'. Please check the name."
-            return send_message(reply_url, sender, error_msg, source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=error_msg, source=source)
 
         activity_data = ActivityLogCreate(
             lead_id=lead.id,
@@ -77,14 +78,16 @@ async def handle_add_activity(db: Session, msg_text: str, sender: str, reply_url
                         
                         create_reminder(db, ReminderCreate(
                             lead_id=lead.id, user_id=assignee_user.id, assigned_to=assignee_user.username,
-                            remind_time=remind_time, message=reminder_message
+                            remind_time=remind_time, message=reminder_message,
+                            is_hidden_from_activity_log=False # User-generated reminder, should be visible
                         ))
 
                         one_hour_before = remind_time - timedelta(hours=1)
                         if one_hour_before > datetime.utcnow():
                             create_reminder(db, ReminderCreate(
                                 lead_id=lead.id, user_id=assignee_user.id, assigned_to=assignee_user.username,
-                                remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}"
+                                remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}",
+                                is_hidden_from_activity_log=False # User-generated reminder, should be visible
                             ))
                         
                         logger.info(f"Scheduled reminder for activity on lead {lead.id} for assignee {assignee_user.username}")
@@ -103,17 +106,20 @@ async def handle_add_activity(db: Session, msg_text: str, sender: str, reply_url
                     f"'{details}'\n\n"
                     f"- Logged by {logged_by_info}"
                 )
-                send_whatsapp_message(reply_url, assignee_user.usernumber, notification_msg)
+                # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
+                send_whatsapp_message(number=assignee_user.usernumber, message=notification_msg)
                 logger.info(f"Sent activity notification to assignee {assignee_user.username}")
 
         success_msg = f"✅ Activity logged successfully for *{lead.company_name}*."
         if reminder_set and remind_time:
             success_msg += f"\n\n⏰ Reminder has also been set for the assignee for {remind_time.strftime('%A, %b %d at %I:%M %p')}."
 
-        return send_message(reply_url, sender, success_msg, source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=success_msg, source=source)
 
     except Exception as e:
         logger.error(f"Error creating activity log: {e}", exc_info=True)
         db.rollback()
         error_msg = "❌ An internal error occurred while logging the activity."
-        return send_message(reply_url, sender, error_msg, source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=error_msg, source=source)

@@ -1,9 +1,8 @@
-# app/reminders.py
 from datetime import datetime, date, time, timedelta
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models import Reminder, User, LeadDripAssignment
-from app.message_sender import send_whatsapp_message
+from app.message_sender import send_whatsapp_message # Only send_whatsapp_message is needed here
 from app.crud import get_active_drip_assignments, get_sent_step_ids_for_assignment, log_sent_drip_message
 import asyncio
 import logging
@@ -63,9 +62,9 @@ async def reminder_loop():
                         reminder.status = "failed" # Mark as failed to avoid retrying
                         continue
 
-                    # Send the WhatsApp message to the fetched user_phone
-                    # Assuming you have a default reply_url for system-initiated messages
-                    success = send_whatsapp_message(None, user_phone, f"⏰ Reminder: {reminder.message}")
+                    # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
+                    # It expects (number: str, message: str)
+                    success = send_whatsapp_message(number=user_phone, message=f"⏰ Reminder: {reminder.message}")
                     
                     if success:
                         reminder.status = "sent"
@@ -126,8 +125,8 @@ async def drip_campaign_loop():
                             
                             primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
                             if primary_contact and message_content:
+                                # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
                                 success = send_whatsapp_message(
-                                    reply_url=None,
                                     number=primary_contact.phone,
                                     message=message_content
                                 )

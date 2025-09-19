@@ -5,11 +5,26 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Bool
 from sqlalchemy.orm import relationship
 from app.db import Base
 
+
+class MasterData(Base):
+    __tablename__ = "MasterData"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    category = Column(String(100), nullable=False, index=True)
+    value = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class LeadStatus(str, enum.Enum):
     NEW = "new"
     QUALIFIED = "qualified"
     UNQUALIFIED = "unqualified"
     NOT_OUR_SEGMENT = "not_our_segment"
+    MEETING_SCHEDULED = "Meeting Scheduled"
+    DEMO_SCHEDULED = "Demo Scheduled"
+    MEETING_DONE = "Meeting Done"
+    DEMO_DONE = "Demo Done"
+    WON_DEAL_DONE = "Won/Deal Done" # Added new status
+    LOST = "Lost"
 
 class TaskStatus(str, enum.Enum):
     PENDING = "pending"
@@ -38,6 +53,8 @@ class Contact(Base):
     phone = Column(String, nullable=True)
     email = Column(String, nullable=True)
     designation = Column(String, nullable=True) # e.g., "Manager", "IT Head"
+    linkedIn = Column(String, nullable=True) # New Field
+    pan = Column(String, nullable=True) # New Field
     lead = relationship("Lead", back_populates="contacts")
 
 class Lead(Base):
@@ -48,6 +65,8 @@ class Lead(Base):
     created_by = Column(String, nullable=False)
     assigned_to = Column(String, ForeignKey("users.username"), nullable=False)
     email = Column(String, nullable=True)
+    website = Column(String, nullable=True) # New Field
+    linkedIn = Column(String, nullable=True) # New Field
     address = Column(String, nullable=True)
     address_2 = Column(String, nullable=True) # New Field
     city = Column(String, nullable=True) # New Field
@@ -55,6 +74,7 @@ class Lead(Base):
     pincode = Column(String, nullable=True) # New Field
     country = Column(String, nullable=True) # New Field
     segment = Column(String, nullable=True)
+    verticles = Column(String, nullable=True)
     team_size = Column(String, nullable=True)
     remark = Column(Text, nullable=True)
     status = Column(String, default="new")
@@ -64,6 +84,8 @@ class Lead(Base):
     current_system = Column(String, nullable=True)
     machine_specification = Column(Text, nullable=True)
     challenges = Column(Text, nullable=True)
+    opportunity_business = Column(String, nullable=True)
+    target_closing_date = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     contacts = relationship("Contact", back_populates="lead", cascade="all, delete-orphan")
@@ -79,12 +101,11 @@ class Lead(Base):
     activities = relationship("ActivityLog", back_populates="lead")
     drip_assignments = relationship("LeadDripAssignment", back_populates="lead")
 
-# (The rest of the models are correct and do not need changes)
 class ActivityLog(Base):
     __tablename__ = "activity_logs"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
-    activity_type = Column(String, nullable=False, default="Call")  
+    activity_type = Column(String, nullable=False, default="Call")
     phase = Column(String, nullable=False)
     details = Column(Text, nullable=False)
     attachment_path = Column(String, nullable=True)
@@ -108,6 +129,7 @@ class Event(Base):
     lead_id = Column(Integer, ForeignKey("leads.id"))
     assigned_to = Column(String)
     event_type = Column(String)
+    meeting_type = Column(String, nullable=True) # e.g., "4- Phase Meeting", "Discussion"
     event_time = Column(DateTime)
     event_end_time = Column(DateTime, nullable=True)
     created_by = Column(String)
@@ -127,6 +149,7 @@ class Reminder(Base):
     assigned_to = Column(String)
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.now)
+    is_hidden_from_activity_log = Column(Boolean, default=False)
     lead = relationship("Lead", back_populates="reminders")
     user = relationship("User", back_populates="reminders")
 
@@ -213,7 +236,7 @@ class DripSequenceStep(Base):
     day_to_send = Column(Integer, nullable=False)
     time_to_send = Column(String, nullable=False) # Storing time as string for simplicity
     sequence_order = Column(Integer, nullable=False)
-    
+
     # Relationships
     drip_sequence = relationship("DripSequence", back_populates="steps")
     message = relationship("MessageMaster")
@@ -225,7 +248,7 @@ class LeadDripAssignment(Base):
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
     drip_sequence_id = Column(Integer, ForeignKey("DripSequence.id"), nullable=False)
-    
+
     start_date = Column(Date, nullable=False, default=date.today)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -245,3 +268,49 @@ class SentDripMessageLog(Base):
 
     assignment = relationship("LeadDripAssignment", back_populates="sent_messages")
     step = relationship("DripSequenceStep")
+
+
+# NEW CLIENT MODELS
+class Client(Base):
+    __tablename__ = "Clients"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    company_name = Column(String, nullable=False)
+    website = Column(String, nullable=True)
+    linkedIn = Column(String, nullable=True)
+    company_email = Column(String, nullable=True)
+    company_phone_2 = Column(String, nullable=True)
+    address = Column(String, nullable=True)
+    address_2 = Column(String, nullable=True)
+    city = Column(String, nullable=True)
+    state = Column(String, nullable=True)
+    pincode = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+    segment = Column(String, nullable=True)
+    verticles = Column(String, nullable=True)
+    team_size = Column(String, nullable=True)
+    turnover = Column(String, nullable=True)
+    current_system = Column(String, nullable=True)
+    machine_specification = Column(Text, nullable=True)
+    challenges = Column(Text, nullable=True)
+    version = Column(String, nullable=True)
+    database_type = Column(String, nullable=True)
+    amc = Column(String, nullable=True)
+    gst = Column(String, nullable=True)
+    converted_date = Column(Date, nullable=False, default=date.today)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    contacts = relationship("ClientContact", back_populates="client", cascade="all, delete-orphan")
+
+class ClientContact(Base):
+    __tablename__ = "ClientContacts"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    client_id = Column(Integer, ForeignKey("Clients.id"), nullable=False)
+    contact_name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    designation = Column(String, nullable=True)
+    linkedIn = Column(String, nullable=True)
+    pan = Column(String, nullable=True)
+
+    client = relationship("Client", back_populates="contacts")

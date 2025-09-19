@@ -3,14 +3,38 @@ from datetime import datetime, date
 from typing import Optional, Union, List
 from sqlalchemy.orm import Session, aliased
 import re
-from sqlalchemy import func, union_all, literal_column, case 
+from sqlalchemy import func, union_all, literal_column, case
 from app import models, schemas
 from app.schemas import (
-    UserCreate, UserPasswordChange, LeadCreate, LeadUpdateWeb, EventCreate, 
-    UserUpdate, HistoryItemOut, ContactCreate, ActivityLogCreate, 
-    AssignmentLogCreate, ReminderCreate, ActivityLogUpdate
+    UserCreate, UserPasswordChange, LeadCreate, LeadUpdateWeb, EventCreate,
+    UserUpdate, HistoryItemOut, ContactCreate, ActivityLogCreate,
+    AssignmentLogCreate, ReminderCreate, ActivityLogUpdate,
+    ClientCreate, ConvertLeadToClientPayload, ClientContactCreate,
+    ClientUpdate, ClientContactUpdate # Import new schemas
 )
-from app.models import User, Event, ActivityLog, Lead, AssignmentLog, Demo, Contact,LeadDripAssignment, SentDripMessageLog, DripSequenceStep 
+from app.models import (
+    User, Event, ActivityLog, Lead, AssignmentLog, Demo, Contact,
+    LeadDripAssignment, SentDripMessageLog, DripSequenceStep,
+    Client, ClientContact
+)
+
+def get_master_data_by_category(db: Session, category: str):
+    return db.query(models.MasterData).filter(models.MasterData.category == category, models.MasterData.is_active == True).order_by(models.MasterData.value).all()
+
+def create_master_data(db: Session, item: schemas.MasterDataCreate):
+    db_item = models.MasterData(**item.model_dump())
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    return db_item
+
+def delete_master_data(db: Session, item_id: int) -> bool:
+    db_item = db.query(models.MasterData).filter(models.MasterData.id == item_id).first()
+    if not db_item:
+        return False
+    db.delete(db_item)
+    db.commit()
+    return True
 
 def create_user(db: Session, user: UserCreate):
     db_user = models.User(
@@ -45,7 +69,7 @@ def verify_user(db: Session, username: str, password: str) -> Optional[models.Us
         return user
     return None
 
-def change_user_password(db: Session, user_data: UserPasswordChange) -> Optional[models.User]:
+def change_user_password(db: Session, user_data: schemas.UserPasswordChange) -> Optional[models.User]:
     user_to_update = verify_user(db, user_data.username, user_data.old_password)
     if not user_to_update: return None
     user_to_update.password = user_data.new_password
@@ -53,7 +77,7 @@ def change_user_password(db: Session, user_data: UserPasswordChange) -> Optional
     db.refresh(user_to_update)
     return user_to_update
 
-def update_user(db: Session, user_id: int, user_data: UserUpdate) -> Optional[models.User]:
+def update_user(db: Session, user_id: int, user_data: schemas.UserUpdate) -> Optional[models.User]:
     db_user = get_user_by_id(db, user_id)
     if not db_user: return None
     update_data = user_data.model_dump(exclude_unset=True)
@@ -97,28 +121,27 @@ def get_tasks_by_username(db: Session, username: str):
 def get_activities_by_lead_id(db: Session, lead_id: int):
     return db.query(ActivityLog).filter(ActivityLog.lead_id == lead_id).order_by(ActivityLog.created_at.desc()).all()
 
-def get_lead_history(db: Session, lead_id: int) -> list[HistoryItemOut]:
+def get_lead_history(db: Session, lead_id: int) -> list[schemas.HistoryItemOut]:
     lead = db.query(Lead).filter(Lead.id == lead_id).first()
     if not lead: return []
     history = []
     creator = get_user_by_phone(db, lead.created_by) or get_user_by_name(db, lead.created_by)
     creator_name = creator.username if creator else lead.created_by
-    history.append(HistoryItemOut(timestamp=lead.created_at, event_type="Lead Creation", details=f"Lead created and assigned to {lead.assigned_to}.", user=creator_name))
+    history.append(schemas.HistoryItemOut(timestamp=lead.created_at, event_type="Lead Creation", details=f"Lead created and assigned to {lead.assigned_to}.", user=creator_name))
     activities = db.query(ActivityLog).filter(ActivityLog.lead_id == lead_id).all()
     for activity in activities:
         user_match = re.search(r"by (.+?)(?:\.|$)", activity.details)
         user = user_match.group(1).strip() if user_match else "System"
-        history.append(HistoryItemOut(timestamp=activity.created_at, event_type="Activity / Status Change", details=activity.details, user=user))
+        history.append(schemas.HistoryItemOut(timestamp=activity.created_at, event_type="Activity / Status Change", details=activity.details, user=user))
     assignments = db.query(AssignmentLog).filter(AssignmentLog.lead_id == lead_id).all()
     for assign in assignments:
         assigner = get_user_by_phone(db, assign.assigned_by) or get_user_by_name(db, assign.assigned_by)
         assigner_name = assigner.username if assigner else assign.assigned_by
-        history.append(HistoryItemOut(timestamp=assign.assigned_at, event_type="Reassignment", details=f"Lead reassigned to {assign.assigned_to}.", user=assigner_name))
+        history.append(schemas.HistoryItemOut(timestamp=assign.assigned_at, event_type="Reassignment", details=f"Lead reassigned to {assign.assigned_to}.", user=assigner_name))
     history.sort(key=lambda item: item.timestamp, reverse=True)
     return history
 
-# --- THIS IS THE CORRECTED AND FINAL save_lead FUNCTION ---
-def save_lead(db: Session, lead_data: LeadCreate) -> models.Lead:
+def save_lead(db: Session, lead_data: schemas.LeadCreate) -> models.Lead:
     """
     Creates a new Lead and its initial Contact person(s).
     This function is now robust against missing optional contact fields.
@@ -134,6 +157,8 @@ def save_lead(db: Session, lead_data: LeadCreate) -> models.Lead:
         created_by=lead_data.created_by,
         assigned_to=assigned_user.username,
         email=lead_data.email,
+        website=lead_data.website, # New Field
+        linkedIn=lead_data.linkedIn, # New Field
         address=lead_data.address,
         address_2=lead_data.address_2,
         city=lead_data.city,
@@ -142,6 +167,7 @@ def save_lead(db: Session, lead_data: LeadCreate) -> models.Lead:
         country=lead_data.country,
         team_size=str(lead_data.team_size) if lead_data.team_size else None,
         segment=lead_data.segment,
+        verticles=lead_data.verticles,
         remark=lead_data.remark,
         lead_type=lead_data.lead_type,
         phone_2=lead_data.phone_2,
@@ -149,9 +175,11 @@ def save_lead(db: Session, lead_data: LeadCreate) -> models.Lead:
         current_system=lead_data.current_system,
         machine_specification=lead_data.machine_specification,
         challenges=lead_data.challenges,
+        opportunity_business=lead_data.opportunity_business,
+        target_closing_date=lead_data.target_closing_date,
         created_at=datetime.now()
     )
-    
+
     db.add(db_lead)
     # Commit here to get an ID for the lead, which is needed for the contacts
     db.commit()
@@ -159,28 +187,25 @@ def save_lead(db: Session, lead_data: LeadCreate) -> models.Lead:
 
     # Now, loop through the contact data and add contacts
     for contact_pydantic in lead_data.contacts:
-        # Convert the Pydantic model to a dictionary to safely access its values
         contact_dict = contact_pydantic.model_dump()
-        
-        # Create a SQLAlchemy Contact model using .get() for safety.
-        # .get('key') will return None if the key doesn't exist, preventing the AttributeError.
+
         db_contact = models.Contact(
             lead_id=db_lead.id,
             contact_name=contact_dict.get('contact_name'),
             phone=contact_dict.get('phone'),
             email=contact_dict.get('email'),
-            designation=contact_dict.get('designation')
+            designation=contact_dict.get('designation'),
+            linkedIn=contact_dict.get('linkedIn'), # New Field
+            pan=contact_dict.get('pan') # New Field
         )
         db.add(db_contact)
-    
-    # Commit again to save the contacts
+
     db.commit()
     db.refresh(db_lead)
-    
-    return db_lead
-# --- END CORRECTION ---
 
-def create_contact_for_lead(db: Session, lead_id: int, contact: ContactCreate) -> models.Contact:
+    return db_lead
+
+def create_contact_for_lead(db: Session, lead_id: int, contact: schemas.ContactCreate) -> models.Contact:
     db_contact = models.Contact(**contact.model_dump(), lead_id=lead_id)
     db.add(db_contact)
     db.commit()
@@ -190,7 +215,7 @@ def create_contact_for_lead(db: Session, lead_id: int, contact: ContactCreate) -
 def get_contacts_by_lead_id(db: Session, lead_id: int) -> List[models.Contact]:
     return db.query(models.Contact).filter(models.Contact.lead_id == lead_id).all()
 
-def update_lead(db: Session, lead_id: int, lead_data: LeadUpdateWeb):
+def update_lead(db: Session, lead_id: int, lead_data: schemas.LeadUpdateWeb):
     """
     Updates a lead and its contacts, and correctly logs a single, accurate activity.
     """
@@ -199,18 +224,18 @@ def update_lead(db: Session, lead_id: int, lead_data: LeadUpdateWeb):
         return None
 
     update_data = lead_data.model_dump(exclude_unset=True)
-    
+
     # --- STEP 1: Separate the special fields from the simple ones ---
     contacts_data = update_data.pop("contacts", None)
     new_status = update_data.pop("status", None)
     activity_details = update_data.pop("activity_details", None)
     activity_type = update_data.pop("activity_type", "General")
-    
+
     # --- STEP 2: Update all the simple, direct fields on the lead model ---
     for key, value in update_data.items():
         if hasattr(db_lead, key):
             setattr(db_lead, key, value)
-    
+
     db_lead.updated_at = datetime.utcnow()
 
     # --- STEP 3: Handle contact updates (delete and recreate for simplicity) ---
@@ -222,7 +247,9 @@ def update_lead(db: Session, lead_id: int, lead_data: LeadUpdateWeb):
                 contact_name=contact_info.get("contact_name"),
                 phone=contact_info.get("phone"),
                 email=contact_info.get("email"),
-                designation=contact_info.get("designation")
+                designation=contact_info.get("designation"),
+                linkedIn=contact_info.get("linkedIn"), # New Field
+                pan=contact_info.get("pan") # New Field
             )
             db.add(new_contact)
 
@@ -242,7 +269,7 @@ def update_lead(db: Session, lead_id: int, lead_data: LeadUpdateWeb):
     elif activity_details:
         # ONLY if the status did NOT change, but we have new notes,
         # we log a simple activity.
-        create_activity_log(db, ActivityLogCreate(
+        create_activity_log(db, schemas.ActivityLogCreate(
             lead_id=lead_id,
             phase=db_lead.status, # Log against the current status
             details=activity_details,
@@ -260,36 +287,37 @@ def update_lead_status(db: Session, lead_id: int, status: str, updated_by: str, 
     if lead:
         old_status = lead.status
         lead.status = status
-        
+
         # Construct the activity details. Start with the status change.
         activity_details = f"Status changed from '{old_status}' to '{status}' by {updated_by}."
-        
+
         # If a remark (from activity_details) was also provided, append it.
         if remark:
             activity_details += f"\nNote: {remark}"
-        
+
         # Create a single, comprehensive log entry.
-        create_activity_log(db, ActivityLogCreate(
-            lead_id=lead.id, 
-            phase=status, 
+        create_activity_log(db, schemas.ActivityLogCreate(
+            lead_id=lead.id,
+            phase=status,
             details=activity_details,
-        )) 
+        ))
         # Note: We do not need to commit here because the calling function (`update_lead`) will commit.
     return lead
 
-def create_event(db: Session, event: EventCreate):
+def create_event(db: Session, event: schemas.EventCreate):
     db_event = models.Event(
-        lead_id=event.lead_id, 
-        assigned_to=event.assigned_to, 
-        event_type=event.event_type, 
-        event_time=event.event_time, 
-        event_end_time=event.event_end_time, 
-        created_by=event.created_by, 
-        remark=event.remark, 
+        lead_id=event.lead_id,
+        assigned_to=event.assigned_to,
+        event_type=event.event_type,
+        meeting_type=event.meeting_type,
+        event_time=event.event_time,
+        event_end_time=event.event_end_time,
+        created_by=event.created_by,
+        remark=event.remark,
         created_at=datetime.now(),
-        phase="Scheduled"  # <-- THE CRITICAL FIX IS ADDING THIS LINE
+        phase="Scheduled"
     )
-    
+
     db.add(db_event)
     db.commit()
     db.refresh(db_event)
@@ -315,20 +343,20 @@ def complete_demo(db: Session, demo_id: int, notes: str, updated_by: str) -> Opt
     db.refresh(demo)
     return demo
 
-def create_activity_log(db: Session, activity: ActivityLogCreate):
+def create_activity_log(db: Session, activity: schemas.ActivityLogCreate):
     db_activity = models.ActivityLog(
-        lead_id=activity.lead_id, 
-        phase=activity.phase, 
+        lead_id=activity.lead_id,
+        phase=activity.phase,
         details=activity.details,
         activity_type=activity.activity_type,
-        created_at=datetime.utcnow()  # Explicitly set consistent timestamp
+        created_at=datetime.utcnow()
     )
     db.add(db_activity)
     db.commit()
     db.refresh(db_activity)
     return db_activity
 
-def create_assignment_log(db: Session, log: AssignmentLogCreate):
+def create_assignment_log(db: Session, log: schemas.AssignmentLogCreate):
     db_log = models.AssignmentLog(lead_id=log.lead_id, assigned_to=log.assigned_to, assigned_by=log.assigned_by)
     db.add(db_log)
     db.commit()
@@ -337,25 +365,22 @@ def create_assignment_log(db: Session, log: AssignmentLogCreate):
 
 def is_user_available(db: Session, username: str, user_phone: str, start_time: datetime, end_time: datetime, exclude_event_id: int = None, exclude_demo_id: int = None) -> Optional[Union[Event, Demo]]:
     """
-    Checks for conflicting events in a database-agnostic way by making all datetimes 
+    Checks for conflicting events in a database-agnostic way by making all datetimes
     timezone-naive before comparison. This works reliably on SQLite, PostgreSQL, and MySQL.
     """
-    # CRITICAL FIX: Convert the incoming timezone-aware datetimes from the request
-    # into timezone-naive datetimes. This allows for a direct, "apples-to-apples" 
-    # comparison with the naive datetimes stored in your database.
     start_time_naive = start_time.replace(tzinfo=None)
     end_time_naive = end_time.replace(tzinfo=None)
 
     # --- Check for conflicting MEETINGS (assigned by username) ---
     meeting_conflict_query = db.query(models.Event).filter(
         models.Event.assigned_to == username,
-        models.Event.event_time < end_time_naive,        # Compare naive to naive
-        models.Event.event_end_time > start_time_naive,   # Compare naive to naive
+        models.Event.event_time < end_time_naive,
+        models.Event.event_end_time > start_time_naive,
         models.Event.phase == "Scheduled"
     )
     if exclude_event_id:
         meeting_conflict_query = meeting_conflict_query.filter(models.Event.id != exclude_event_id)
-    
+
     conflicting_meeting = meeting_conflict_query.first()
     if conflicting_meeting:
         return conflicting_meeting
@@ -363,39 +388,37 @@ def is_user_available(db: Session, username: str, user_phone: str, start_time: d
     # --- Check for conflicting DEMOS (assigned by usernumber/phone) ---
     demo_conflict_query = db.query(models.Demo).filter(
         models.Demo.assigned_to == user_phone,
-        models.Demo.start_time < end_time_naive,          # Compare naive to naive
-        models.Demo.event_end_time > start_time_naive,    # Compare naive to naive
+        models.Demo.start_time < end_time_naive,
+        models.Demo.event_end_time > start_time_naive,
         models.Demo.phase == "Scheduled"
     )
     if exclude_demo_id:
         demo_conflict_query = demo_conflict_query.filter(models.Demo.id != exclude_demo_id)
-        
+
     conflicting_demo = demo_conflict_query.first()
     if conflicting_demo:
         return conflicting_demo
 
-    # If no conflicts are found, the user is available
     return None
 
 
-def create_reminder(db: Session, reminder_data: schemas.ReminderCreate): # This is now the definitive version
+def create_reminder(db: Session, reminder_data: schemas.ReminderCreate):
     """Creates a new reminder in the database."""
-    
-    # Get the user to link the reminder correctly
+
     user = get_user_by_id(db, reminder_data.user_id)
     if not user:
-        # This case should ideally not happen if created_by_user_id is validated
         return None
 
     new_reminder = models.Reminder(
         lead_id=reminder_data.lead_id,
         user_id=reminder_data.user_id,
-        assigned_to=user.username, # Assign to the creator by default
+        assigned_to=user.username,
         remind_time=reminder_data.remind_time,
         message=reminder_data.message,
         activity_type=reminder_data.activity_type,
         status="pending",
-        created_at=datetime.utcnow()
+        created_at=datetime.utcnow(),
+        is_hidden_from_activity_log=reminder_data.is_hidden_from_activity_log
     )
     db.add(new_reminder)
     db.commit()
@@ -476,17 +499,17 @@ def update_drip_sequence(db: Session, drip_id: int, drip_data: schemas.DripSeque
     db_drip = get_drip_sequence_by_id(db, drip_id)
     if not db_drip:
         return None
-        
+
     # Update the name
     db_drip.drip_name = drip_data.drip_name
-    
+
     # Easiest way to handle step updates: delete old ones and create new ones
     db.query(models.DripSequenceStep).filter(models.DripSequenceStep.drip_sequence_id == drip_id).delete()
-    
+
     for step_data in drip_data.steps:
         db_step = models.DripSequenceStep(**step_data.model_dump(), drip_sequence_id=drip_id)
         db.add(db_step)
-        
+
     db.commit()
     db.refresh(db_drip)
     return db_drip
@@ -515,7 +538,7 @@ def find_and_complete_reminder(db: Session, lead_id: int, message_like: str) -> 
         reminder_to_complete.status = 'completed'
         db.commit()
         return True
-    
+
     return False
 
 def get_pending_reminders(db: Session) -> list[models.Reminder]:
@@ -581,18 +604,18 @@ def complete_scheduled_activity(db: Session, reminder_id: int, notes: str, updat
     # 2. Create a new ActivityLog entry from the completed reminder
     # We combine the original message with the new outcome notes.
     activity_details = f"{reminder_to_complete.message}\n---\nOutcome: {notes}"
-    
+
     new_activity_log = models.ActivityLog(
         lead_id=reminder_to_complete.lead_id,
         phase="Discussion Done",  # Or another appropriate status
         details=f"{activity_details} - Marked as done by {updated_by}"
     )
     db.add(new_activity_log)
-    
+
     # 3. Commit all changes to the database
     db.commit()
     db.refresh(reminder_to_complete)
-    
+
     return reminder_to_complete
 
 def get_all_unified_activities(db: Session, username: str, is_admin: bool) -> List[any]:
@@ -606,7 +629,7 @@ def get_all_unified_activities(db: Session, username: str, is_admin: bool) -> Li
         literal_column("'log'").label("type"),
         ActivityLog.lead_id.label("lead_id"),
         Lead.company_name.label("company_name"),
-        
+
         case(
             (ActivityLog.activity_type != None, ActivityLog.activity_type),
             else_=literal_column("'General'")
@@ -624,22 +647,21 @@ def get_all_unified_activities(db: Session, username: str, is_admin: bool) -> Li
         literal_column("'reminder'").label("type"),
         models.Reminder.lead_id.label("lead_id"),
         Lead.company_name.label("company_name"),
-        
+
         case(
             (models.Reminder.activity_type != None, models.Reminder.activity_type),
             else_=literal_column("'Follow-up'")
         ).label("activity_type"),
-        
+
         models.Reminder.message.label("details"),
         models.Reminder.status.label("status"),
         models.Reminder.created_at.label("created_at"),
         models.Reminder.remind_time.label("scheduled_for")
-    ).join(Lead, Lead.id == models.Reminder.lead_id)
+    ).join(Lead, Lead.id == models.Reminder.lead_id) \
+    .filter(models.Reminder.is_hidden_from_activity_log == False)
 
     if not is_admin:
         logged_activities_query = logged_activities_query.filter(Lead.assigned_to == username)
-        # --- THIS IS THE FIX ---
-        # Scheduled activities must be filtered by who they are assigned to in the Reminder table, not the Lead table.
         scheduled_activities_query = scheduled_activities_query.filter(models.Reminder.assigned_to == username)
 
     unified_query = union_all(logged_activities_query, scheduled_activities_query).alias("unified")
@@ -648,7 +670,6 @@ def get_all_unified_activities(db: Session, username: str, is_admin: bool) -> Li
 
 
 def reschedule_meeting(db: Session, meeting_id: int, start_time: datetime, end_time: datetime, updated_by: str) -> Optional[models.Event]:
-    # --- FIX: Allow rescheduling if the event is 'Scheduled' OR 'Rescheduled' ---
     event = db.query(models.Event).filter(
         models.Event.id == meeting_id,
         models.Event.phase.in_(["Scheduled", "Rescheduled"])
@@ -664,7 +685,7 @@ def reschedule_meeting(db: Session, meeting_id: int, start_time: datetime, end_t
     event.event_end_time = end_time
     event.phase = "Rescheduled"
 
-    create_activity_log(db, ActivityLogCreate(
+    create_activity_log(db, schemas.ActivityLogCreate(
         lead_id=event.lead_id,
         phase="Rescheduled",
         details=f"Meeting rescheduled from {old_time} to {new_time} by {updated_by}."
@@ -677,11 +698,11 @@ def reassign_meeting(db: Session, meeting_id: int, new_assignee: User, updated_b
     event = db.query(models.Event).filter(models.Event.id == meeting_id, models.Event.phase.in_(["Scheduled", "Rescheduled"])).first()
     if not event:
         return None
-        
+
     old_assignee = event.assigned_to
     event.assigned_to = new_assignee.username
-    
-    create_activity_log(db, ActivityLogCreate(
+
+    create_activity_log(db, schemas.ActivityLogCreate(
         lead_id=event.lead_id,
         phase="Reassigned",
         details=f"Meeting reassigned from {old_assignee} to {new_assignee.username} by {updated_by}."
@@ -694,11 +715,11 @@ def cancel_meeting(db: Session, meeting_id: int, reason: str, updated_by: str) -
     event = db.query(models.Event).filter(models.Event.id == meeting_id, models.Event.phase.in_(["Scheduled", "Rescheduled"])).first()
     if not event:
         return None
-        
+
     event.phase = "Canceled"
     event.remark = f"Canceled by {updated_by}. Reason: {reason}"
-    
-    create_activity_log(db, ActivityLogCreate(
+
+    create_activity_log(db, schemas.ActivityLogCreate(
         lead_id=event.lead_id,
         phase="Canceled",
         details=f"Meeting canceled by {updated_by}. Reason: {reason}"
@@ -711,10 +732,10 @@ def update_meeting_notes(db: Session, meeting_id: int, notes: str, updated_by: s
     event = db.query(models.Event).filter(models.Event.id == meeting_id, models.Event.phase == "Done").first()
     if not event:
         return None
-    
+
     event.remark = notes # Overwrites old notes
     # Optionally, log this change as well
-    create_activity_log(db, ActivityLogCreate(
+    create_activity_log(db, schemas.ActivityLogCreate(
         lead_id=event.lead_id,
         phase="Notes Updated",
         details=f"Meeting notes updated by {updated_by}."
@@ -726,7 +747,6 @@ def update_meeting_notes(db: Session, meeting_id: int, notes: str, updated_by: s
 # --- NEW: CRUD Functions for Event (Demo) Modifications ---
 
 def reschedule_demo(db: Session, demo_id: int, start_time: datetime, end_time: datetime, updated_by: str) -> Optional[models.Demo]:
-    # --- FIX: Allow rescheduling if the demo is 'Scheduled' OR 'Rescheduled' ---
     demo = db.query(models.Demo).filter(
         models.Demo.id == demo_id,
         models.Demo.phase.in_(["Scheduled", "Rescheduled"])
@@ -741,7 +761,7 @@ def reschedule_demo(db: Session, demo_id: int, start_time: datetime, end_time: d
     demo.event_end_time = end_time
     demo.phase = "Rescheduled"
 
-    create_activity_log(db, ActivityLogCreate(lead_id=demo.lead_id, phase="Rescheduled", details=f"Demo rescheduled from {old_time} to {new_time} by {updated_by}."))
+    create_activity_log(db, schemas.ActivityLogCreate(lead_id=demo.lead_id, phase="Rescheduled", details=f"Demo rescheduled from {old_time} to {new_time} by {updated_by}."))
     db.commit()
     db.refresh(demo)
     return demo
@@ -749,11 +769,11 @@ def reschedule_demo(db: Session, demo_id: int, start_time: datetime, end_time: d
 def reassign_demo(db: Session, demo_id: int, new_assignee: User, updated_by: str) -> Optional[models.Demo]:
     demo = db.query(models.Demo).filter(models.Demo.id == demo_id, models.Demo.phase.in_(["Scheduled", "Rescheduled"])).first()
     if not demo: return None
-        
+
     old_assignee_num = demo.assigned_to
     demo.assigned_to = new_assignee.usernumber
-    
-    create_activity_log(db, ActivityLogCreate(lead_id=demo.lead_id, phase="Reassigned", details=f"Demo reassigned from user number {old_assignee_num} to {new_assignee.username} by {updated_by}."))
+
+    create_activity_log(db, schemas.ActivityLogCreate(lead_id=demo.lead_id, phase="Reassigned", details=f"Demo reassigned from user number {old_assignee_num} to {new_assignee.username} by {updated_by}."))
     db.commit()
     db.refresh(demo)
     return demo
@@ -761,11 +781,11 @@ def reassign_demo(db: Session, demo_id: int, new_assignee: User, updated_by: str
 def cancel_demo(db: Session, demo_id: int, reason: str, updated_by: str) -> Optional[models.Demo]:
     demo = db.query(models.Demo).filter(models.Demo.id == demo_id, models.Demo.phase.in_(["Scheduled", "Rescheduled"])).first()
     if not demo: return None
-        
+
     demo.phase = "Canceled"
     demo.remark = f"Canceled by {updated_by}. Reason: {reason}"
-    
-    create_activity_log(db, ActivityLogCreate(lead_id=demo.lead_id, phase="Canceled", details=f"Demo canceled by {updated_by}. Reason: {reason}"))
+
+    create_activity_log(db, schemas.ActivityLogCreate(lead_id=demo.lead_id, phase="Canceled", details=f"Demo canceled by {updated_by}. Reason: {reason}"))
     db.commit()
     db.refresh(demo)
     return demo
@@ -773,20 +793,20 @@ def cancel_demo(db: Session, demo_id: int, reason: str, updated_by: str) -> Opti
 def update_demo_notes(db: Session, demo_id: int, notes: str, updated_by: str) -> Optional[models.Demo]:
     demo = db.query(models.Demo).filter(models.Demo.id == demo_id, models.Demo.phase == "Done").first()
     if not demo: return None
-    
+
     demo.remark = notes
-    create_activity_log(db, ActivityLogCreate(lead_id=demo.lead_id, phase="Notes Updated", details=f"Demo notes updated by {updated_by}."))
+    create_activity_log(db, schemas.ActivityLogCreate(lead_id=demo.lead_id, phase="Notes Updated", details=f"Demo notes updated by {updated_by}."))
     db.commit()
     db.refresh(demo)
     return demo
 
 # --- NEW: CRUD Functions for Activity Management ---
 
-def update_activity_log(db: Session, activity_id: int, activity_data: ActivityLogUpdate) -> Optional[models.ActivityLog]:
+def update_activity_log(db: Session, activity_id: int, activity_data: schemas.ActivityLogUpdate) -> Optional[models.ActivityLog]:
     db_activity = db.query(models.ActivityLog).filter(models.ActivityLog.id == activity_id).first()
     if not db_activity:
         return None
-    
+
     db_activity.details = activity_data.details
     if activity_data.activity_type:
         db_activity.activity_type = activity_data.activity_type
@@ -804,7 +824,6 @@ def delete_activity_log(db: Session, activity_id: int) -> bool:
     return True
 
 def delete_reminder(db: Session, reminder_id: int) -> bool:
-    # We can "cancel" a scheduled activity by simply deleting the reminder
     db_reminder = db.query(models.Reminder).filter(models.Reminder.id == reminder_id, models.Reminder.status == 'pending').first()
     if not db_reminder:
         return False
@@ -843,8 +862,145 @@ def get_all_leads_with_last_activity(db: Session):
     # This is much cleaner and more reliable than converting to a dictionary.
     leads_to_return = []
     for lead, activity in results:
-        # Pydantic will use this new attribute during model validation.
-        lead.last_activity = activity 
+        lead.last_activity = activity
         leads_to_return.append(lead)
-        
+
     return leads_to_return
+
+# NEW CLIENT CRUD FUNCTIONS
+def create_client(db: Session, client_data: schemas.ClientCreate) -> models.Client:
+    db_client = models.Client(
+        company_name=client_data.company_name,
+        website=client_data.website,
+        linkedIn=client_data.linkedIn,
+        company_email=client_data.company_email,
+        company_phone_2=client_data.company_phone_2,
+        address=client_data.address,
+        address_2=client_data.address_2,
+        city=client_data.city,
+        state=client_data.state,
+        pincode=client_data.pincode,
+        country=client_data.country,
+        segment=client_data.segment,
+        verticles=client_data.verticles,
+        team_size=str(client_data.team_size) if client_data.team_size else None,
+        turnover=client_data.turnover,
+        current_system=client_data.current_system,
+        machine_specification=client_data.machine_specification,
+        challenges=client_data.challenges,
+        version=client_data.version,
+        database_type=client_data.database_type,
+        amc=client_data.amc,
+        gst=client_data.gst,
+        converted_date=client_data.converted_date or date.today(),
+        created_at=datetime.now()
+    )
+    db.add(db_client)
+    db.flush() # Get ID for contacts
+
+    for contact_pydantic in client_data.contacts:
+        contact_dict = contact_pydantic.model_dump()
+        db_client_contact = models.ClientContact(
+            client_id=db_client.id,
+            contact_name=contact_dict.get('contact_name'),
+            phone=contact_dict.get('phone'),
+            email=contact_dict.get('email'),
+            designation=contact_dict.get('designation'),
+            linkedIn=contact_dict.get('linkedIn'),
+            pan=contact_dict.get('pan')
+        )
+        db.add(db_client_contact)
+
+    db.commit()
+    db.refresh(db_client)
+    return db_client
+
+def get_all_clients(db: Session) -> List[models.Client]:
+    return db.query(models.Client).order_by(models.Client.created_at.desc()).all()
+
+def get_client_by_id(db: Session, client_id: int) -> Optional[models.Client]:
+    return db.query(models.Client).filter(models.Client.id == client_id).first()
+
+# NEW: Update Client CRUD function
+def update_client(db: Session, client_id: int, client_data: schemas.ClientUpdate) -> Optional[models.Client]:
+    db_client = db.query(models.Client).filter(models.Client.id == client_id).first()
+    if not db_client:
+        return None
+
+    update_data = client_data.model_dump(exclude_unset=True)
+
+    # Handle nested contacts update
+    contacts_data = update_data.pop("contacts", None)
+
+    for key, value in update_data.items():
+        if hasattr(db_client, key):
+            setattr(db_client, key, value)
+
+    db_client.updated_at = datetime.utcnow()
+
+    if contacts_data is not None:
+        # Simple approach: delete existing contacts and recreate
+        db.query(models.ClientContact).filter(models.ClientContact.client_id == client_id).delete(synchronize_session=False)
+        for contact_info in contacts_data:
+            # Note: client_id is implied by the relationship or can be set explicitly
+            new_contact = models.ClientContact(
+                client_id=db_client.id,
+                contact_name=contact_info.get("contact_name"),
+                phone=contact_info.get("phone"),
+                email=contact_info.get("email"),
+                designation=contact_info.get("designation"),
+                linkedIn=contact_info.get("linkedIn"),
+                pan=contact_info.get("pan")
+            )
+            db.add(new_contact)
+
+    db.commit()
+    db.refresh(db_client)
+    return db_client
+
+
+def convert_lead_to_client(db: Session, lead_id: int, conversion_data: schemas.ConvertLeadToClientPayload, converted_by: str) -> models.Client:
+    lead = db.query(models.Lead).filter(models.Lead.id == lead_id).first()
+    if not lead:
+        raise ValueError(f"Lead with ID {lead_id} not found.")
+
+    # Create ClientCreate schema from lead and conversion_data
+    client_contacts_create = []
+    for contact_data in conversion_data.contacts:
+        client_contacts_create.append(schemas.ClientContactCreate(**contact_data.model_dump()))
+
+    client_create_payload = schemas.ClientCreate(
+        company_name=conversion_data.company_name or lead.company_name,
+        website=conversion_data.website or lead.website,
+        linkedIn=conversion_data.linkedIn or lead.linkedIn,
+        company_email=conversion_data.company_email or lead.email,
+        company_phone_2=conversion_data.company_phone_2 or lead.phone_2,
+        address=conversion_data.address or lead.address,
+        address_2=conversion_data.address_2 or lead.address_2,
+        city=conversion_data.city or lead.city,
+        state=conversion_data.state or lead.state,
+        pincode=conversion_data.pincode or lead.pincode,
+        country=conversion_data.country or lead.country,
+        segment=conversion_data.segment or lead.segment,
+        verticles=conversion_data.verticles or lead.verticles,
+        team_size=str(conversion_data.team_size) if conversion_data.team_size else str(lead.team_size) if lead.team_size else None,
+        turnover=conversion_data.turnover or lead.turnover,
+        current_system=conversion_data.current_system or lead.current_system,
+        machine_specification=conversion_data.machine_specification or lead.machine_specification,
+        challenges=conversion_data.challenges or lead.challenges,
+        version=conversion_data.version,
+        database_type=conversion_data.database_type,
+        amc=conversion_data.amc,
+        gst=conversion_data.gst,
+        converted_date=conversion_data.converted_date or date.today(),
+        contacts=client_contacts_create
+    )
+
+    new_client = create_client(db, client_create_payload)
+
+    # Update lead status
+    update_lead_status(db, lead_id, models.LeadStatus.WON_DEAL_DONE.value, converted_by, remark="Converted to Client")
+
+    db.commit() # Commit all changes
+    db.refresh(lead) # Refresh lead to reflect status change
+    return new_client

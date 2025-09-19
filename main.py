@@ -24,6 +24,8 @@ app = FastAPI(
 origins = [
 "http://localhost:3000",
 "http://192.168.1.62:3000",
+"http://157.20.215.187:3001",
+"http://157.20.215.187:7200",
 "https://9f7cb36b5732.ngrok-free.app", # Your Ngrok URL
 ]
 app.add_middleware(

@@ -121,7 +121,6 @@ User Message:
         return {}, "❌ An unexpected error occurred."
 
 
-# --- THIS FUNCTION IS NOW CORRECTED ---
 def parse_update_fields(message: str):
     """
     Uses GPT to extract only optional lead fields from a message for updating an existing lead.
@@ -222,7 +221,6 @@ User Message:
         return {}, "❌ An unexpected error occurred."
 
 
-# --- NEW PARSER FUNCTION ---
 def parse_core_lead_update(message: str):
     """
     Uses GPT to extract core lead fields for an update, such as company_name.
@@ -380,7 +378,7 @@ def parse_datetime_from_text(text: str) -> datetime:
     """
     
     # --- STEP 1: Use regex to find and isolate the date/time part of the string ---
-    # This pattern looks for phrases like "on [date] at [time]", "at [time] on [date]", "tomorrow at 5pm", etc.
+    # This pattern looks for phrases like "on [date] at [time]", "tomorrow at 5pm", etc.
     # It helps remove confusing words like "follow up".
     match = re.search(r'(on\s|at\s|tomorrow|today|next\sweek)[\w\s:/]+', text, re.IGNORECASE)
     
@@ -405,4 +403,4 @@ def parse_datetime_from_text(text: str) -> datetime:
     else:
         logger.warning(f"⚠️ Could not parse datetime from '{text}'. Defaulting to tomorrow at 12 PM.")
         tomorrow = datetime.now() + timedelta(days=1)
-        return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0)
+        return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0) 

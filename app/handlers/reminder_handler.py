@@ -1,8 +1,9 @@
+import re
 from sqlalchemy.orm import Session
 from app.models import Reminder, Lead, User
-from app.message_sender import send_message
-from app.crud import get_lead_by_company, get_user_by_phone, create_activity_log
-from app.schemas import ActivityLogCreate
+from app.message_sender import send_message # Ensure send_whatsapp_message is NOT directly imported here if only send_message is intended for replies
+from app.crud import get_lead_by_company, get_user_by_phone, create_activity_log, create_reminder
+from app.schemas import ActivityLogCreate, ReminderCreate
 from datetime import datetime, timedelta, date, time
 import re
 import dateparser
@@ -66,21 +67,24 @@ async def handle_set_reminder(db: Session, message: str, sender: str, reply_url:
         if log_match:
             lead = get_lead_by_company(db, log_match.group('company').strip())
             if not lead:
-                return send_message(reply_url, sender, f"⚠️ Could not find lead: {log_match.group('company').strip()}", source)
+                # Corrected: send_message arguments
+                return send_message(number=sender, message=f"⚠️ Could not find lead: {log_match.group('company').strip()}", source=source)
             
             user = get_user_by_phone(db, sender)
             log_details = f"{log_match.group('details').strip()} - Logged by {user.username if user else sender}"
             
             create_activity_log(db, ActivityLogCreate(lead_id=lead.id, phase=lead.status, details=log_details,activity_type="Call"))
             
-            return send_message(reply_url, sender, f"✅ Activity logged for *{lead.company_name}*.", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=f"✅ Activity logged for *{lead.company_name}*.", source=source)
 
         # If not a log, try to parse it as a reminder using our new robust parser
         reminder_msg, lead_name, time_str = parse_reminder_details(message)
 
         if not reminder_msg or not lead_name:
             error_msg = "⚠️ Invalid format. Use: `Remind me to [action] for [Company] on [Date/Time]` or `Add activity for [Company], [details]`"
-            return send_message(reply_url, sender, error_msg, source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=error_msg, source=source)
 
         remind_time = None
         default_scheduled = False
@@ -89,7 +93,8 @@ async def handle_set_reminder(db: Session, message: str, sender: str, reply_url:
             remind_time = dateparser.parse(time_str, settings={'PREFER_DATES_FROM': 'future'})
             if not remind_time:
                 error_msg = f"❌ I couldn't understand the date or time: '{time_str}'. Please be more specific."
-                return send_message(reply_url, sender, error_msg, source)
+                # Corrected: send_message arguments
+                return send_message(number=sender, message=error_msg, source=source)
         else:
             # If no time_str was found, set reminder for next day at 12:00 PM
             today = date.today()
@@ -99,32 +104,36 @@ async def handle_set_reminder(db: Session, message: str, sender: str, reply_url:
 
         lead = get_lead_by_company(db, lead_name)
         if not lead:
-            return send_message(reply_url, sender, f"⚠️ Could not find lead: '{lead_name}'", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message=f"⚠️ Could not find lead: '{lead_name}'", source=source)
         
         user = get_user_by_phone(db, sender)
         if not user:
-            return send_message(reply_url, sender, "⚠️ You are not recognized in the system. Cannot set reminder.", source)
+            # Corrected: send_message arguments
+            return send_message(number=sender, message="⚠️ You are not recognized in the system. Cannot set reminder.", source=source)
 
-        reminder = Reminder(
+        # Using create_reminder for consistency
+        create_reminder(db, ReminderCreate(
             lead_id=lead.id,
             user_id=user.id,
             assigned_to=user.username,
             remind_time=remind_time,
             message=reminder_msg,
             activity_type="Follow-up",
+            is_hidden_from_activity_log=False, # User-generated reminder, should be visible
             status="pending"
-        )
-        db.add(reminder)
-        db.commit()
+        ))
 
         time_format = '%d/%m/%Y %I:%M %p'
         success_msg = f"✅ Reminder set for *{lead.company_name}* on {remind_time.strftime(time_format)}."
         if default_scheduled:
             success_msg += " (Default time used as none was provided)."
             
-        return send_message(reply_url, sender, success_msg, source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=success_msg, source=source)
 
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Error setting reminder: {e}", exc_info=True)
-        return send_message(reply_url, sender, "❌ An internal error occurred while setting the reminder.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="❌ An internal error occurred while setting the reminder.", source=source)

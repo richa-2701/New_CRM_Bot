@@ -1,5 +1,4 @@
-# app/handlers/discussion_handler.py
-
+# discussion_handler
 import re
 import logging
 from sqlalchemy.orm import Session
@@ -8,7 +7,7 @@ from dateparser.search import search_dates
 
 from app.crud import get_lead_by_company, create_activity_log, get_user_by_name, create_reminder, find_and_complete_reminder
 from app.schemas import ActivityLogCreate, ReminderCreate
-from app.message_sender import send_message
+from app.message_sender import send_message # Only send_message is needed here
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +34,13 @@ async def handle_log_discussion(db: Session, msg_text: str, sender: str, reply_u
     """Handles logging a discussion that has already happened."""
     company_name, details = parse_log_or_done_message("log discussion", msg_text)
     if not company_name:
-        return send_message(reply_url, sender, "⚠️ Invalid format. Use: `log discussion for [Company], [details]`", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="⚠️ Invalid format. Use: `log discussion for [Company], [details]`", source=source)
 
     lead = get_lead_by_company(db, company_name)
     if not lead:
-        return send_message(reply_url, sender, f"❌ Lead not found for '{company_name}'.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=f"❌ Lead not found for '{company_name}'.", source=source)
 
     # Log the discussion as a completed activity
     create_activity_log(db, ActivityLogCreate(
@@ -48,29 +49,34 @@ async def handle_log_discussion(db: Session, msg_text: str, sender: str, reply_u
         details=details
     ))
 
-    return send_message(reply_url, sender, f"✅ Discussion for *{lead.company_name}* has been logged.", source)
+    # Corrected: send_message arguments
+    return send_message(number=sender, message=f"✅ Discussion for *{lead.company_name}* has been logged.", source=source)
 
 
 async def handle_schedule_discussion(db: Session, msg_text: str, sender: str, reply_url: str, source: str):
     """Handles scheduling a future discussion and sets a reminder."""
     company_name, details = parse_schedule_message(msg_text)
     if not company_name:
-        return send_message(reply_url, sender, "⚠️ Invalid format. Use: `schedule discussion for [Company], [details including date/time]`", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="⚠️ Invalid format. Use: `schedule discussion for [Company], [details including date/time]`", source=source)
     
     lead = get_lead_by_company(db, company_name)
     if not lead:
-        return send_message(reply_url, sender, f"❌ Lead not found for '{company_name}'.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=f"❌ Lead not found for '{company_name}'.", source=source)
 
     # Find a date in the details
     parsed_dates = search_dates(details, settings={'PREFER_DATES_FROM': 'future'})
     if not parsed_dates:
-        return send_message(reply_url, sender, "⚠️ No future date found in the details. Please specify when to schedule the discussion (e.g., 'tomorrow at 2pm').", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="⚠️ No future date found in the details. Please specify when to schedule the discussion (e.g., 'tomorrow at 2pm').", source=source)
 
     remind_time = parsed_dates[0][1]
     assignee_user = get_user_by_name(db, lead.assigned_to)
 
     if not assignee_user:
-        return send_message(reply_url, sender, f"❌ Cannot find assignee '{lead.assigned_to}' to set reminder.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=f"❌ Cannot find assignee '{lead.assigned_to}' to set reminder.", source=source)
 
     # 1. Log the activity that the discussion has been scheduled
     create_activity_log(db, ActivityLogCreate(
@@ -90,18 +96,21 @@ async def handle_schedule_discussion(db: Session, msg_text: str, sender: str, re
     ))
 
     success_msg = f"✅ Discussion for *{lead.company_name}* has been scheduled.\n\n⏰ A reminder has been set for the assignee for {remind_time.strftime('%A, %b %d at %I:%M %p')}."
-    return send_message(reply_url, sender, success_msg, source)
+    # Corrected: send_message arguments
+    return send_message(number=sender, message=success_msg, source=source)
 
 
 async def handle_discussion_done(db: Session, msg_text: str, sender: str, reply_url: str, source: str):
     """Handles marking a previously scheduled discussion as complete."""
     company_name, details = parse_log_or_done_message("discussion done", msg_text)
     if not company_name:
-        return send_message(reply_url, sender, "⚠️ Invalid format. Use: `discussion done for [Company], [outcome notes]`", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message="⚠️ Invalid format. Use: `discussion done for [Company], [outcome notes]`", source=source)
 
     lead = get_lead_by_company(db, company_name)
     if not lead:
-        return send_message(reply_url, sender, f"❌ Lead not found for '{company_name}'.", source)
+        # Corrected: send_message arguments
+        return send_message(number=sender, message=f"❌ Lead not found for '{company_name}'.", source=source)
     
     # 1. Log the completion activity
     create_activity_log(db, ActivityLogCreate(
@@ -117,4 +126,5 @@ async def handle_discussion_done(db: Session, msg_text: str, sender: str, reply_
     if reminder_completed:
         success_msg += "\n\nThe scheduled reminder for this discussion has been marked as complete."
 
-    return send_message(reply_url, sender, success_msg, source)
+    # Corrected: send_message arguments
+    return send_message(number=sender, message=success_msg, source=source)
