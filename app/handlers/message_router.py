@@ -135,10 +135,11 @@ async def route_message(sender: str, message_text: str, reply_url: str, source: 
         # 5. Final fallback if nothing else matches
         else:
             fallback = (
-                "🤖 I didn't understand that command. You can say things like:\n"
-                "➡️ 'New lead ...'\n"
-                "➡️ 'Log discussion for ...'\n"
-                "➡️ 'Schedule meeting with ...'"
+                "🤖 this is testing message, ignore it"
+                # "🤖 I didn't understand that command. You can say things like:\n"
+                # "➡️ 'New lead ...'\n"
+                # "➡️ 'Log discussion for ...'\n"
+                # "➡️ 'Schedule meeting with ...'"
             )
             return send_message(number=sender, message=fallback, source=source)
 

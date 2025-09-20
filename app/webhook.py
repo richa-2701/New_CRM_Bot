@@ -276,6 +276,25 @@ async def receive_app_message(req: Request):
 def create_lead_from_web(lead_data: LeadCreate, db: Session = Depends(get_db)):
     try:
         created_lead = save_lead(db, lead_data)
+        
+        # --- FIX: Send WhatsApp notification to assignee ---
+        assignee = get_user_by_name(db, lead_data.assigned_to)
+        if assignee and assignee.usernumber:
+            creator_name = lead_data.created_by
+            contact_name = created_lead.contacts[0].contact_name if created_lead.contacts else "N/A"
+            contact_phone= created_lead.contacts[0].phone if created_lead.contacts else "N/A"
+            
+            message = (
+                f"📢 *New Lead Assigned to You*\n\n"
+                f"🏢 *Company:* {created_lead.company_name}\n"
+                f"👤 *Contact:* {contact_name}\n"
+                f"📱 *Phone:* {contact_phone}\n"
+                f"Assigned By: {creator_name}"
+            )
+            
+            send_whatsapp_message(number=assignee.usernumber, message=message)
+            logger.info(f"Sent new lead notification to {assignee.username} at {assignee.usernumber}")
+
         return created_lead
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -429,10 +448,25 @@ def schedule_meeting_from_web(meeting_data: MeetingScheduleWeb, db: Session = De
     )
 
     new_event = create_event(db, event_schema)
-
     lead = get_lead_by_id(db, meeting_data.lead_id)
-    time_formatted = new_event.event_time.strftime('%A, %b %d at %I:%M %p')
-    reminder_message = f"You have a meeting scheduled for *{lead.company_name}* on {time_formatted}."
+
+    # --- FIX: Send WhatsApp notification for scheduled meeting ---
+    if assignee.usernumber:
+        time_formatted = new_event.event_time.strftime('%A, %b %d at %I:%M %p')
+        contact_name = lead.contacts[0].contact_name if lead.contacts else "N/A"
+        message = (
+            f"📢 *New Meeting Scheduled for You*\n\n"
+            f"🏢 *Company:* {lead.company_name}\n"
+            f"👤 *Contact:* {contact_name}\n"
+            f"🕒 *Time:* {time_formatted}\n"
+            f"Scheduled By: {creator.username}"
+        )
+        send_whatsapp_message(number=assignee.usernumber, message=message)
+        logger.info(f"Sent new meeting notification to {assignee.username} at {assignee.usernumber}")
+
+    # Create automatic system reminders (hidden from main activity log)
+    time_formatted_reminder = new_event.event_time.strftime('%A, %b %d at %I:%M %p')
+    reminder_message = f"You have a meeting scheduled for *{lead.company_name}* on {time_formatted_reminder}."
 
     one_day_before = new_event.event_time - timedelta(days=1)
     if one_day_before > datetime.utcnow():
@@ -480,8 +514,23 @@ def schedule_demo_from_web(demo_data: DemoScheduleWeb, db: Session = Depends(get
         updated_by=creator.username
     )
 
-    time_formatted = new_demo.start_time.strftime('%A, %b %d at %I:%M %p')
-    reminder_message = f"You have a demo scheduled for *{lead.company_name}* on {time_formatted}."
+    # --- FIX: Send WhatsApp notification for scheduled demo ---
+    if assignee.usernumber:
+        time_formatted = new_demo.start_time.strftime('%A, %b %d at %I:%M %p')
+        contact_name = lead.contacts[0].contact_name if lead.contacts else "N/A"
+        message = (
+            f"📢 *New Demo Scheduled for You*\n\n"
+            f"🏢 *Company:* {lead.company_name}\n"
+            f"👤 *Contact:* {contact_name}\n"
+            f"🕒 *Time:* {time_formatted}\n"
+            f"Scheduled By: {creator.username}"
+        )
+        send_whatsapp_message(number=assignee.usernumber, message=message)
+        logger.info(f"Sent new demo notification to {assignee.username} at {assignee.usernumber}")
+
+    # Create automatic system reminders (hidden from main activity log)
+    time_formatted_reminder = new_demo.start_time.strftime('%A, %b %d at %I:%M %p')
+    reminder_message = f"You have a demo scheduled for *{lead.company_name}* on {time_formatted_reminder}."
 
     one_day_before = new_demo.start_time - timedelta(days=1)
     if one_day_before > datetime.utcnow():
@@ -799,19 +848,39 @@ def schedule_activity_from_web(
     db: Session = Depends(get_db)
 ):
     """
-    Schedules a new activity (reminder) directly from the web application.
+    Schedules a new activity (reminder) and correctly converts the time to UTC before saving.
     """
     creator = get_user_by_id(db, activity_data.created_by_user_id)
     if not creator:
         raise HTTPException(status_code=404, detail="Creating user not found.")
 
-    remind_time = parse_datetime_from_text(activity_data.details)
+    lead = get_lead_by_id(db, activity_data.lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found for scheduling activity.")
 
-    message_for_reminder = activity_data.details
+    # 1. Parse the time from the text. This will be a naive datetime object in the server's local time.
+    remind_time_local_naive = parse_datetime_from_text(activity_data.details)
+    
+    # --- THIS IS THE FIX ---
+    # 2. Convert the naive local time to an aware UTC time for correct storage.
+    try:
+        # Assume the server's local timezone is IST for this conversion.
+        local_tz = pytz.timezone('Asia/Kolkata')
+        # Make the naive local time aware of its timezone
+        remind_time_local_aware = local_tz.localize(remind_time_local_naive)
+        # Convert the aware local time to aware UTC time
+        remind_time_utc_aware = remind_time_local_aware.astimezone(pytz.utc)
+        # Make it naive again for storage, as the DB column doesn't store timezone info.
+        remind_time_utc_naive = remind_time_utc_aware.replace(tzinfo=None)
+    except Exception as e:
+        logger.error(f"Timezone conversion failed: {e}. Falling back to naive time.")
+        remind_time_utc_naive = remind_time_local_naive # Fallback
+
+    message_for_reminder = f"For {lead.company_name}: {activity_data.details}"
 
     reminder_payload = ReminderCreate(
         lead_id=activity_data.lead_id,
-        remind_time=remind_time,
+        remind_time=remind_time_utc_naive, # Use the corrected UTC time
         message=message_for_reminder,
         assigned_to=creator.username,
         user_id=creator.id,
@@ -822,7 +891,7 @@ def schedule_activity_from_web(
     db_reminder = create_reminder(db, reminder_payload)
     if not db_reminder:
         raise HTTPException(status_code=500, detail="Failed to create reminder.")
-
+        
     return db_reminder
 
 

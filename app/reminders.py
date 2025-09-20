@@ -1,15 +1,15 @@
+# reminders.py
 from datetime import datetime, date, time, timedelta
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models import Reminder, User, LeadDripAssignment
-from app.message_sender import send_whatsapp_message # Only send_whatsapp_message is needed here
+from app.message_sender import send_whatsapp_message
 from app.crud import get_active_drip_assignments, get_sent_step_ids_for_assignment, log_sent_drip_message
 import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
 
-# This helper function to save a reminder is fine.
 def schedule_reminder(
     db: Session,
     lead_id: int,
@@ -20,7 +20,7 @@ def schedule_reminder(
     reminder = Reminder(
         lead_id=lead_id,
         user_id=user_id,
-        assigned_to=user_id, # Keep assigned_to for consistency if needed elsewhere
+        assigned_to=user_id,
         message=message,
         remind_time=remind_at,
         status="pending",
@@ -31,24 +31,24 @@ def schedule_reminder(
     db.refresh(reminder)
     return reminder
 
-# This is the main background loop for sending reminders.
-# It has been corrected to fetch user phone numbers correctly.
 async def reminder_loop():
     """
     A continuous loop that runs in the background to check for and send due reminders.
+    This version includes critical fixes for timezone handling and API calls.
     """
     while True:
-        # Use a new session for each check to avoid stale session issues.
         db = SessionLocal()
         try:
-            # --- CRITICAL FIX: Use utcnow() to compare against UTC timestamps ---
             now = datetime.utcnow()
             
-            # The query now joins Reminder with User to get the phone number
             due_reminders_with_users = (
                 db.query(Reminder, User.usernumber)
                 .join(User, Reminder.user_id == User.id)
-                .filter(Reminder.remind_time <= now, Reminder.status == "pending")
+                .filter(
+                    Reminder.remind_time <= now, 
+                    Reminder.status == "pending",
+                    Reminder.is_hidden_from_activity_log == False
+                )
                 .all()
             )
 
@@ -59,11 +59,9 @@ async def reminder_loop():
                 try:
                     if not user_phone:
                         logger.warning(f"Skipping reminder ID {reminder.id} because user {reminder.user_id} has no phone number.")
-                        reminder.status = "failed" # Mark as failed to avoid retrying
+                        reminder.status = "failed"
                         continue
 
-                    # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
-                    # It expects (number: str, message: str)
                     success = send_whatsapp_message(number=user_phone, message=f"⏰ Reminder: {reminder.message}")
                     
                     if success:
@@ -77,15 +75,14 @@ async def reminder_loop():
                     reminder.status = "failed"
                     logger.error(f"❌ Exception sending reminder ID {reminder.id}: {e}", exc_info=True)
                 finally:
-                    db.commit() # Commit status change for each reminder individually
+                    db.commit()
 
         except Exception as outer_e:
             logger.error(f"⚠️ An error occurred in the reminder loop: {outer_e}", exc_info=True)
             db.rollback()
         finally:
-            db.close() # Always close the session
+            db.close()
 
-        # Sleep for 60 seconds (1 minute) between checks
         await asyncio.sleep(60)
 
 
@@ -116,8 +113,6 @@ async def drip_campaign_loop():
 
                 for step in steps_to_process:
                     try:
-                        # --- THIS IS THE CORRECTED LINE ---
-                        # Ensure the value is a string before parsing.
                         scheduled_time = time.fromisoformat(str(step.time_to_send))
                         
                         if step.day_to_send < days_passed or (step.day_to_send == days_passed and now >= scheduled_time):
@@ -125,7 +120,6 @@ async def drip_campaign_loop():
                             
                             primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
                             if primary_contact and message_content:
-                                # --- CRITICAL FIX: Corrected send_whatsapp_message call ---
                                 success = send_whatsapp_message(
                                     number=primary_contact.phone,
                                     message=message_content
@@ -144,5 +138,4 @@ async def drip_campaign_loop():
         finally:
             db.close()
 
-        # Check every 5 minutes
         await asyncio.sleep(300)

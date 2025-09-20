@@ -101,14 +101,14 @@ async def handle_meeting_schedule(db: Session, message_text: str, sender_phone: 
         if one_day_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=user_for_assignment.id, assigned_to=user_for_assignment.username,
-                remind_time=one_day_before, message=f"(1 day away) {reminder_message}"
+                remind_time=one_day_before, message=f"(1 day away) {reminder_message}", is_hidden_from_activity_log=True
             ))
 
         one_hour_before = meeting_dt - timedelta(hours=1)
         if one_hour_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=user_for_assignment.id, assigned_to=user_for_assignment.username,
-                remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}"
+                remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}", is_hidden_from_activity_log=True
             ))
         
         logger.info(f"Scheduled pre-meeting reminders for event ID {new_event.id}")
@@ -207,14 +207,14 @@ async def handle_reschedule_meeting(db: Session, msg_text: str, sender: str, rep
         if one_day_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
-                remind_time=one_day_before, message=f" (1 day away) {reminder_message}"
+                remind_time=one_day_before, message=f" (1 day away) {reminder_message}", is_hidden_from_activity_log=True
             ))
 
         one_hour_before = new_datetime - timedelta(hours=1)
         if one_hour_before > datetime.utcnow():
             create_reminder(db, ReminderCreate(
                 lead_id=lead.id, user_id=final_assignee_user.id, assigned_to=final_assignee_user.username,
-                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}"
+                remind_time=one_hour_before, message=f" (in 1 hour) {reminder_message}", is_hidden_from_activity_log=True
             ))
         
         logger.info(f"Re-scheduled pre-meeting reminders for event ID {event.id} for user {final_assignee_user.username}")

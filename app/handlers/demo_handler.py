@@ -338,8 +338,7 @@ async def handle_post_demo(db: Session, message_text: str, sender: str, reply_ur
                 remind_time=follow_up_time,
                 message=f"🔔 Follow-up with {company_name} after demo",
                 status="follow up",
-                created_at=datetime.utcnow(),
-                is_hidden_from_activity_log=False
+                created_at=datetime.utcnow()
             )
             db.add(reminder)
             db.commit()

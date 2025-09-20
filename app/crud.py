@@ -587,35 +587,36 @@ def get_sent_step_ids_for_assignment(db: Session, assignment_id: int) -> List[in
 
 def complete_scheduled_activity(db: Session, reminder_id: int, notes: str, updated_by: str) -> Optional[models.Reminder]:
     """
-    Finds a pending reminder (scheduled activity), marks it as 'completed',
+    Finds a pending or sent reminder, marks it as 'completed',
     and creates a new entry in the ActivityLog table.
     """
+    # --- FIX: The query now accepts 'pending' OR 'sent' as a valid status ---
     reminder_to_complete = db.query(models.Reminder).filter(
         models.Reminder.id == reminder_id,
-        models.Reminder.status == 'pending'
+        models.Reminder.status.in_(['pending', 'sent'])
     ).first()
 
     if not reminder_to_complete:
         return None
 
-    # 1. Update the reminder's status
+    # 1. Update the reminder's status to 'completed'
     reminder_to_complete.status = 'completed'
 
     # 2. Create a new ActivityLog entry from the completed reminder
-    # We combine the original message with the new outcome notes.
     activity_details = f"{reminder_to_complete.message}\n---\nOutcome: {notes}"
-
+    
     new_activity_log = models.ActivityLog(
         lead_id=reminder_to_complete.lead_id,
-        phase="Discussion Done",  # Or another appropriate status
-        details=f"{activity_details} - Marked as done by {updated_by}"
+        phase="Discussion Done",
+        details=f"{activity_details} - Marked as done by {updated_by}",
+        activity_type=reminder_to_complete.activity_type # Carry over the activity type
     )
     db.add(new_activity_log)
-
+    
     # 3. Commit all changes to the database
     db.commit()
     db.refresh(reminder_to_complete)
-
+    
     return reminder_to_complete
 
 def get_all_unified_activities(db: Session, username: str, is_admin: bool) -> List[any]:
