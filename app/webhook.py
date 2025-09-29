@@ -1,5 +1,7 @@
-# webhook
+# app/webhook.py
 from fastapi import APIRouter, Request, Response, status,HTTPException,Depends,UploadFile, File, Form
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from app.handlers.message_router import route_message
 import logging
 from fastapi.responses import StreamingResponse
@@ -13,10 +15,12 @@ from ics import Calendar, Event as ICSEvent
 from app.models import User
 import pytz
 import os
+from pydantic import BaseModel
 import re
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 from countryinfo import CountryInfo
 import io
+from fastapi.responses import FileResponse
 from typing import Optional, List
 from app import models
 from app.models import Lead, Event, Demo, Reminder, Client, ClientContact
@@ -29,7 +33,7 @@ from app.schemas import (
     PostMeetingWeb, DemoScheduleWeb,MarkActivityDonePayload, PostDemoWeb,ReminderOut,
     EventReschedulePayload, EventReassignPayload, EventCancelPayload,
     EventNotesUpdatePayload, ActivityLogUpdate, MasterDataCreate, MasterDataOut,
-    ClientOut, ConvertLeadToClientPayload, ClientUpdate # Import ClientUpdate
+    ClientOut, ConvertLeadToClientPayload, ClientUpdate
 )
 from app.crud import (
     create_user, verify_user, get_user_by_username, change_user_password,
@@ -45,21 +49,52 @@ from app.crud import (
     reschedule_meeting, reassign_meeting, cancel_meeting, update_meeting_notes,
     reschedule_demo, reassign_demo, cancel_demo, update_demo_notes,
     update_activity_log, get_master_data_by_category, create_master_data, delete_master_data, delete_activity_log, delete_reminder,
-    create_client, get_all_clients, get_client_by_id, convert_lead_to_client, update_client # Import update_client
+    create_client, get_all_clients, get_client_by_id, convert_lead_to_client, update_client,
+    get_user_by_phone
 )
-from sqlalchemy.orm import Session
-from app.db import get_db
+from sqlalchemy.orm import Session,joinedload
+from app.db import get_db, get_db_session_for_company, COMPANY_TO_ENV_MAP
+from app.gpt_parser import parse_report_request, parse_intent_and_fields
+from app.crud import generate_user_performance_data
+from app.report_generator import create_performance_report_pdf
+from app.handlers.message_router import route_message
 from app.gpt_parser import parse_datetime_from_text
-from datetime import datetime, timedelta
-from app.message_sender import send_whatsapp_message
+from datetime import datetime, timedelta, date
+from app.message_sender import send_whatsapp_message, send_whatsapp_message_with_media
 from app.crud import assign_drip_to_lead, log_sent_drip_message
+# --- START: NEW IMPORT FOR THE DELAY ---
+import asyncio
+# --- END: NEW IMPORT ---
 
 
-UPLOAD_DIRECTORY = "uploads"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(APP_DIR)
+UPLOAD_DIRECTORY = os.path.join(PROJECT_ROOT, "uploads")
+
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+app = FastAPI()
+
+origins = [
+    "http://localhost:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 main_router = APIRouter()
 web_router = APIRouter()
+
+if not os.path.exists(UPLOAD_DIRECTORY):
+    os.makedirs(UPLOAD_DIRECTORY)
+
 
 COUNTRY_PHONE_CODES = {
     "india": "+91",
@@ -76,36 +111,41 @@ COUNTRY_PHONE_CODES = {
     "kuwait": "+965",
     "australia": "+61",
     "canada": "+1",
-    # This dictionary can be expanded with more countries as needed
 }
 
+
+LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata')
+
 def get_country_phone_code(country_name: str) -> Optional[str]:
-    """Finds the phone code for a given country name from the mapping."""
     if not country_name:
         return None
     return COUNTRY_PHONE_CODES.get(country_name.lower().strip())
 
 
-# --- USER MANAGEMENT ROUTES (FOR BOTH WEB AND APP) ---
-
 @main_router.post("/register", response_model=UserResponse, tags=["Authentication"])
-def register_user(user: UserCreate, db: Session = Depends(get_db)):
-    existing = get_user_by_username(db, user.username)
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    new_user = create_user(db, user)
-    db.commit()
-    db.refresh(new_user)
-
-    return new_user
+def register_user(user: UserCreate):
+    db = get_db_session_for_company(user.company_name)
+    try:
+        existing = get_user_by_username(db, user.username)
+        if existing:
+            raise HTTPException(status_code=400, detail="Username already exists in this company")
+        
+        new_user = create_user(db, user)
+        return new_user
+    finally:
+        db.close()
 
 
 @main_router.post("/login", response_model=UserResponse, tags=["Authentication"])
-def login_user(user: UserLogin, db: Session = Depends(get_db)):
-    authenticated_user = verify_user(db, user.username, user.password)
-    if not authenticated_user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    return authenticated_user
+def login_user(user: UserLogin):
+    db = get_db_session_for_company(user.company_name)
+    try:
+        authenticated_user = verify_user(db, user.username, user.password)
+        if not authenticated_user:
+            raise HTTPException(status_code=401, detail="Invalid username or password for the specified company")
+        return authenticated_user
+    finally:
+        db.close()
 
 @main_router.post("/change-password", tags=["Users"])
 def change_password(password_data: UserPasswordChange, db: Session = Depends(get_db)):
@@ -115,13 +155,8 @@ def change_password(password_data: UserPasswordChange, db: Session = Depends(get
     db.commit()
     return {"status": "success", "message": "Password updated successfully"}
 
-
 @main_router.get("/users", response_model=list[UserResponse], tags=["Users"])
 def get_all_users(db: Session = Depends(get_db)):
-    """
-    Get a list of all users in the system.
-    This function now manually constructs the response to avoid serialization errors.
-    """
     db_users = get_users(db)
     response = []
     for user in db_users:
@@ -137,7 +172,6 @@ def update_user_details(user_id: int, user_data: UserUpdate, db: Session = Depen
     db.refresh(updated_user)
     return updated_user
 
-# --- Endpoint to delete a user ---
 @web_router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_user(user_id: int, db: Session = Depends(get_db)):
     success = delete_user(db, user_id)
@@ -160,6 +194,70 @@ def api_delete_master_data(item_id: int, db: Session = Depends(get_db)):
     if not success:
         raise HTTPException(status_code=404, detail="Master data item not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+async def handle_generate_report(db: Session, msg_text: str, sender_phone: str):
+    """
+    Handles the entire workflow for generating and sending a performance report PDF.
+    """
+    pdf_file_path = None # Define at the top to ensure it's in scope for finally
+    try:
+        # 1. Parse the request
+        username, start_date, end_date = parse_report_request(msg_text)
+
+        if not all([username, start_date, end_date]):
+            error_msg = "⚠️ Invalid format. Please use:\n`Give report of [username] from [dd/mm/yy] to [dd/mm/yy]`"
+            send_whatsapp_message(number=sender_phone, message=error_msg)
+            return
+
+        # 2. Validate the user
+        user = get_user_by_name(db, username)
+        if not user:
+            error_msg = f"❌ User '{username}' not found. Please check the name and try again."
+            send_whatsapp_message(number=sender_phone, message=error_msg)
+            return
+            
+        # Inform the user that the process has started
+        send_whatsapp_message(number=sender_phone, message=f"⏳ Generating report for *{user.username}*... Please wait.")
+
+        # 3. Generate the report data
+        report_data = generate_user_performance_data(db, user.id, start_date, end_date)
+        if not report_data:
+            error_msg = "❌ Could not generate report data. An internal error occurred."
+            send_whatsapp_message(number=sender_phone, message=error_msg)
+            return
+
+        # 4. Create the PDF
+        pdf_file_path = create_performance_report_pdf(report_data, user.username, start_date, end_date, UPLOAD_DIRECTORY)
+        
+        # 5. Send the PDF
+        caption = f"📊 Here is the performance report for *{user.username}* from {start_date.strftime('%d/%m/%y')} to {end_date.strftime('%d/%m/%y')}."
+        success = send_whatsapp_message_with_media(
+            number=sender_phone,
+            file_path=pdf_file_path,
+            caption=caption,
+            message_type='document' # Send as a document
+        )
+
+        if not success:
+            send_whatsapp_message(number=sender_phone, message="❌ Failed to send the PDF report.")
+
+    except Exception as e:
+        logger.error(f"❌ Critical error in handle_generate_report: {e}", exc_info=True)
+        send_whatsapp_message(number=sender_phone, message="❌ An unexpected error occurred while generating your report.")
+    
+    finally:
+        # --- START: THE FIX ---
+        # Add a delay here to allow the external service (Whatsify) to download the file
+        # before we delete it from our server.
+        if pdf_file_path:
+            logger.info("Waiting for 15 seconds before deleting the temporary report file to allow for download...")
+            await asyncio.sleep(15)
+        
+        # 6. Clean up the temporary file
+        if pdf_file_path and os.path.exists(pdf_file_path):
+            os.remove(pdf_file_path)
+            logger.info(f"Cleaned up temporary report file: {pdf_file_path}")
+        # --- END: THE FIX ---
 
 @main_router.get("/leads/{user_id}", response_model=list[LeadResponse], tags=["Leads & History"])
 async def get_leads_by_user_id(user_id: str, db: Session = Depends(get_db)):
@@ -193,8 +291,6 @@ def get_lead_history_route(lead_id: int, db: Session = Depends(get_db)):
     return history
 
 
-# --- WHATSAPP WEBHOOK AND APP-MESSAGE ROUTES ---
-
 @main_router.get("/webhook", tags=["WhatsApp & App Integration"])
 async def webhook_verification(request: Request):
     logger.info("GET request received at /webhook for verification.")
@@ -209,39 +305,64 @@ async def receive_message(req: Request):
         logger.error(f"❌ Failed to parse incoming JSON: {e}")
         return Response(status_code=status.HTTP_400_BAD_REQUEST, content="Invalid JSON")
 
-    logger.info(f"📦 Incoming Payload: {data}") # Log the full payload for debugging
+    logger.info(f"📦 Incoming Payload: {data}")
 
-    top_level_type = data.get("type") # This will be 'incoming', 'outgoing', etc.
-    inner_data_payload = data.get("data", {}) # This contains the message details
+    top_level_type = data.get("type")
+    inner_data_payload = data.get("data", {})
 
-    # Check if this is an incoming message event we want to process
     if top_level_type == "incoming":
         message_metadata = inner_data_payload.get("metadata", {}).get("message", {})
-        message_content_type = message_metadata.get("type") # e.g., 'text', 'reaction', 'image', etc.
-        message_text = message_metadata.get("caption", "").strip() # Use 'caption' for actual text, defaults to ""
-
-        if message_content_type == "text" and message_text:
+        message_content_type = message_metadata.get("type")
+        
+        message_text = message_metadata.get("text", "") or message_metadata.get("caption", "")
+        message_text = message_text.strip()
+        
+        if (message_content_type == "text" or message_content_type == "media") and message_text:
             sender_phone = inner_data_payload.get("phone")
             if not sender_phone:
                  sender_phone = inner_data_payload.get("metadata", {}).get("other_party", {}).get("number")
 
             source = data.get("event", "whatsapp")
-
             reply_url = ""
-
-            logger.debug(f"Parsed sender_phone: {sender_phone}")
-            logger.debug(f"Parsed message_text: '{message_text}'")
-            logger.debug(f"Parsed source: '{source}'")
 
             if not all([sender_phone, message_text]):
                 logger.warning(f"Missing critical fields in incoming message. Sender: {sender_phone}, Message: '{message_text}'. Full payload: {data}")
                 return Response(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content="Missing critical fields (sender_phone or message_text)")
+            
+            user_company_name = None
+            db_session = None
 
-            logger.info(f"Received WhatsApp message from {sender_phone}: '{message_text}' (Source: {source}) - Routing to message_router.")
+            for company_name in COMPANY_TO_ENV_MAP.keys():
+                db_temp = get_db_session_for_company(company_name)
+                try:
+                    user_check = get_user_by_phone(db_temp, sender_phone)
+                    if user_check:
+                        user_company_name = company_name
+                        db_session = db_temp
+                        break
+                finally:
+                    if not db_session:
+                        db_temp.close()
 
-            response_from_handler = await route_message(sender_phone, message_text, reply_url, source)
+            if not user_company_name or not db_session:
+                logger.warning(f"User with phone {sender_phone} not found in any configured company database.")
+                return Response(status_code=status.HTTP_404_NOT_FOUND, content="User not found")
+            
+            try:
+                intent, _ = parse_intent_and_fields(message_text)
+                logger.info(f"Detected intent '{intent}' for user from '{user_company_name}'")
 
-            return response_from_handler
+                if intent == "generate_report":
+                    await handle_generate_report(db_session, message_text, sender_phone)
+                    return Response(status_code=status.HTTP_200_OK)
+                else:
+                    logger.info(f"Received WhatsApp message from {sender_phone}: '{message_text}' (Source: {source}) - Routing to message_router.")
+                    response_from_handler = await route_message(sender_phone, message_text, reply_url, source, db_session)
+                    return response_from_handler
+            finally:
+                if db_session:
+                    db_session.close()
+
         elif message_content_type == "reaction":
             reaction_emoji = message_metadata.get("text")
             logger.info(f"Skipping reaction message: {reaction_emoji if reaction_emoji else 'Unknown Reaction'}")
@@ -269,15 +390,11 @@ async def receive_app_message(req: Request):
     return response_from_handler
 
 
-# --- ALL ROUTES FOR THE WEB APPLICATION FRONTEND ---
-
-# --- Web/Leads Endpoints ---
 @web_router.post("/leads", response_model=LeadResponse)
 def create_lead_from_web(lead_data: LeadCreate, db: Session = Depends(get_db)):
     try:
         created_lead = save_lead(db, lead_data)
         
-        # --- FIX: Send WhatsApp notification to assignee ---
         assignee = get_user_by_name(db, lead_data.assigned_to)
         if assignee and assignee.usernumber:
             creator_name = lead_data.created_by
@@ -303,16 +420,10 @@ def create_lead_from_web(lead_data: LeadCreate, db: Session = Depends(get_db)):
 
 @web_router.get("/leads", response_model=list[LeadResponse])
 def get_all_leads_for_web(db: Session = Depends(get_db)):
-    """
-    Get all leads to display in the web UI.
-    This function now manually constructs the response to avoid serialization errors.
-    """
-
     db_leads_data = get_all_leads_with_last_activity(db)
     response = []
     for lead_data in db_leads_data:
         response.append(LeadResponse.model_validate(lead_data))
-
     return response
 
 @web_router.get("/leads/{lead_id}", response_model=LeadResponse)
@@ -322,7 +433,6 @@ def get_single_lead_for_web(lead_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Lead not found")
     return lead
 
-# NEW: Convert Lead to Client Endpoint
 @web_router.post("/leads/{lead_id}/convert-to-client", response_model=ClientOut, tags=["Leads", "Clients"])
 def convert_lead_to_client_endpoint(
     lead_id: int,
@@ -330,7 +440,7 @@ def convert_lead_to_client_endpoint(
     db: Session = Depends(get_db)
 ):
     try:
-        converted_by_user = "Web User" # Replace with actual authenticated user
+        converted_by_user = "Web User"
         client = convert_lead_to_client(db, lead_id, conversion_data, converted_by_user)
         return client
     except ValueError as e:
@@ -339,7 +449,6 @@ def convert_lead_to_client_endpoint(
         logger.error(f"Error converting lead {lead_id} to client: {e}")
         raise HTTPException(status_code=500, detail="Failed to convert lead to client. Internal server error.")
 
-# NEW CLIENT ROUTES
 @web_router.get("/clients", response_model=List[ClientOut], tags=["Clients"])
 def get_all_clients_route(db: Session = Depends(get_db)):
     clients = get_all_clients(db)
@@ -352,13 +461,12 @@ def get_client_by_id_route(client_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Client not found")
     return ClientOut.model_validate(client)
 
-# NEW: Update Client Endpoint
 @web_router.put("/clients/{client_id}", response_model=ClientOut, tags=["Clients"])
 def update_client_route(client_id: int, client_data: ClientUpdate, db: Session = Depends(get_db)):
     updated_client = update_client(db, client_id, client_data)
     if not updated_client:
         raise HTTPException(status_code=404, detail="Client not found")
-    db.commit() # Ensure changes are committed if update_client doesn't commit internally
+    db.commit()
     db.refresh(updated_client)
     return ClientOut.model_validate(updated_client)
 
@@ -366,28 +474,28 @@ def update_client_route(client_id: int, client_data: ClientUpdate, db: Session =
 @web_router.get("/meetings", response_model=list[EventOut])
 def get_all_scheduled_meetings(db: Session = Depends(get_db)):
     meetings = get_scheduled_meetings(db)
+    for m in meetings:
+        if m.event_time and m.event_time.tzinfo is None:
+            m.event_time = pytz.utc.localize(m.event_time)
+        if m.event_end_time and m.event_end_time.tzinfo is None:
+            m.event_end_time = pytz.utc.localize(m.event_end_time)
     return [EventOut.model_validate(m) for m in meetings]
 
 @web_router.get("/meetings/all", response_model=list[EventOut])
 def get_every_meeting(db: Session = Depends(get_db)):
-    """Fetches a list of ALL meetings, including completed ones."""
     meetings_from_db = get_all_meetings(db)
-
     response = []
     for meeting in meetings_from_db:
+        aware_event_time = pytz.utc.localize(meeting.event_time) if meeting.event_time and meeting.event_time.tzinfo is None else meeting.event_time
+        aware_end_time = pytz.utc.localize(meeting.event_end_time) if meeting.event_end_time and meeting.event_end_time.tzinfo is None else meeting.event_end_time
         response.append(
             EventOut(
-                id=meeting.id,
-                lead_id=meeting.lead_id,
-                assigned_to=meeting.assigned_to,
-                event_type=meeting.event_type,
-                meeting_type=meeting.meeting_type,
-                event_time=meeting.event_time,
-                event_end_time=meeting.event_end_time,
-                created_by=meeting.created_by,
-                remark=meeting.remark,
-                phase=meeting.phase,
-                created_at=meeting.created_at
+                id=meeting.id, lead_id=meeting.lead_id, assigned_to=meeting.assigned_to,
+                event_type=meeting.event_type, meeting_type=meeting.meeting_type,
+                event_time=aware_event_time, 
+                event_end_time=aware_end_time,
+                created_by=meeting.created_by, remark=meeting.remark,
+                phase=meeting.phase, created_at=meeting.created_at
             )
         )
     return response
@@ -395,27 +503,28 @@ def get_every_meeting(db: Session = Depends(get_db)):
 @web_router.get("/demos", response_model=list[DemoOut])
 def get_all_scheduled_demos(db: Session = Depends(get_db)):
     demos = get_scheduled_demos(db)
+    for d in demos:
+        if d.start_time and d.start_time.tzinfo is None:
+            d.start_time = pytz.utc.localize(d.start_time)
+        if d.event_end_time and d.event_end_time.tzinfo is None:
+            d.event_end_time = pytz.utc.localize(d.event_end_time)
     return [DemoOut.model_validate(d) for d in demos]
 
 @web_router.get("/demos/all", response_model=list[DemoOut])
 def get_every_demo(db: Session = Depends(get_db)):
-    """Fetches a list of ALL demos, including completed ones."""
     demos_from_db = get_all_demos(db)
-
     response = []
     for demo in demos_from_db:
+        aware_start_time = pytz.utc.localize(demo.start_time) if demo.start_time and demo.start_time.tzinfo is None else demo.start_time
+        aware_end_time = pytz.utc.localize(demo.event_end_time) if demo.event_end_time and demo.event_end_time.tzinfo is None else demo.event_end_time
         response.append(
             DemoOut(
-                id=demo.id,
-                lead_id=demo.lead_id,
-                scheduled_by=demo.scheduled_by,
-                assigned_to=demo.assigned_to,
-                start_time=demo.start_time,
-                event_end_time=demo.event_end_time,
+                id=demo.id, lead_id=demo.lead_id, scheduled_by=demo.scheduled_by,
+                assigned_to=demo.assigned_to, 
+                start_time=aware_start_time,
+                event_end_time=aware_end_time, 
                 phase=demo.phase,
-                remark=demo.remark,
-                created_at=demo.created_at,
-                updated_at=demo.updated_at
+                remark=demo.remark, created_at=demo.created_at, updated_at=demo.updated_at
             )
         )
     return response
@@ -426,65 +535,66 @@ def schedule_meeting_from_web(meeting_data: MeetingScheduleWeb, db: Session = De
     creator = get_user_by_id(db, meeting_data.created_by_user_id)
     if not assignee or not creator:
         raise HTTPException(status_code=404, detail="Assignee or Creator user not found")
-    conflicting_event = is_user_available(db, assignee.username, assignee.usernumber, meeting_data.start_time, meeting_data.end_time)
+
+    start_time_req = meeting_data.start_time
+    end_time_req = meeting_data.end_time
+
+    if start_time_req.tzinfo is None:
+        start_time_utc_aware = LOCAL_TIMEZONE.localize(start_time_req).astimezone(pytz.utc)
+    else:
+        start_time_utc_aware = start_time_req.astimezone(pytz.utc)
+
+    if end_time_req.tzinfo is None:
+        end_time_utc_aware = LOCAL_TIMEZONE.localize(end_time_req).astimezone(pytz.utc)
+    else:
+        end_time_utc_aware = end_time_req.astimezone(pytz.utc)
+
+    start_time_local_aware = start_time_utc_aware.astimezone(LOCAL_TIMEZONE)
+    start_time_utc_naive = start_time_utc_aware.replace(tzinfo=None)
+    end_time_utc_naive = end_time_utc_aware.replace(tzinfo=None)
+
+    conflicting_event = is_user_available(db, assignee.username, assignee.usernumber, start_time_utc_naive, end_time_utc_naive)
+
     if conflicting_event:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User '{assignee.username}' is already booked at this time.")
+
     event_schema = EventCreate(
-        lead_id=meeting_data.lead_id,
-        assigned_to=assignee.username,
+        lead_id=meeting_data.lead_id, 
+        assigned_to=assignee.username, 
         event_type="Meeting",
-        meeting_type=meeting_data.meeting_type,
-        event_time=meeting_data.start_time,
-        event_end_time=meeting_data.end_time,
-        created_by=creator.username,
+        meeting_type=meeting_data.meeting_type, 
+        event_time=start_time_utc_naive,
+        event_end_time=end_time_utc_naive,
+        created_by=creator.username, 
         remark="Scheduled via Web UI"
     )
-
-    update_lead_status(
-        db,
-        lead_id=meeting_data.lead_id,
-        status="Meeting Scheduled",
-        updated_by=creator.username
-    )
-
+    update_lead_status(db, lead_id=meeting_data.lead_id, status="Meeting Scheduled", updated_by=creator.username)
     new_event = create_event(db, event_schema)
     lead = get_lead_by_id(db, meeting_data.lead_id)
 
-    # --- FIX: Send WhatsApp notification for scheduled meeting ---
     if assignee.usernumber:
-        time_formatted = new_event.event_time.strftime('%A, %b %d at %I:%M %p')
+        time_formatted = start_time_local_aware.strftime('%A, %b %d at %I:%M %p')
         contact_name = lead.contacts[0].contact_name if lead.contacts else "N/A"
-        message = (
-            f"📢 *New Meeting Scheduled for You*\n\n"
-            f"🏢 *Company:* {lead.company_name}\n"
-            f"👤 *Contact:* {contact_name}\n"
-            f"🕒 *Time:* {time_formatted}\n"
-            f"Scheduled By: {creator.username}"
-        )
+        message = (f"📢 *New Meeting Scheduled for You*\n\n🏢 *Company:* {lead.company_name}\n👤 *Contact:* {contact_name}\n🕒 *Time:* {time_formatted}\nScheduled By: {creator.username}")
         send_whatsapp_message(number=assignee.usernumber, message=message)
         logger.info(f"Sent new meeting notification to {assignee.username} at {assignee.usernumber}")
 
-    # Create automatic system reminders (hidden from main activity log)
-    time_formatted_reminder = new_event.event_time.strftime('%A, %b %d at %I:%M %p')
+    time_formatted_reminder = start_time_local_aware.strftime('%A, %b %d at %I:%M %p')
     reminder_message = f"You have a meeting scheduled for *{lead.company_name}* on {time_formatted_reminder}."
-
     one_day_before = new_event.event_time - timedelta(days=1)
     if one_day_before > datetime.utcnow():
-        create_reminder(db, ReminderCreate(
-            lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username,
-            remind_time=one_day_before, message=f"(1 day away) {reminder_message}",
-            is_hidden_from_activity_log=True
-        ))
-
+        create_reminder(db, ReminderCreate(lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username, remind_time=one_day_before, message=f"(1 day away) {reminder_message}", is_hidden_from_activity_log=True))
     one_hour_before = new_event.event_time - timedelta(hours=1)
     if one_hour_before > datetime.utcnow():
-        create_reminder(db, ReminderCreate(
-            lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username,
-            remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}",
-            is_hidden_from_activity_log=True
-        ))
-
+        create_reminder(db, ReminderCreate(lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username, remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}", is_hidden_from_activity_log=True))
+    
+    if new_event.event_time and new_event.event_time.tzinfo is None:
+        new_event.event_time = pytz.utc.localize(new_event.event_time)
+    if new_event.event_end_time and new_event.event_end_time.tzinfo is None:
+        new_event.event_end_time = pytz.utc.localize(new_event.event_end_time)
+    
     return new_event
+
 
 @web_router.post("/meetings/complete", response_model=schemas.StatusMessage)
 def post_meeting_from_web(data: PostMeetingWeb, db: Session = Depends(get_db)):
@@ -500,55 +610,65 @@ def schedule_demo_from_web(demo_data: DemoScheduleWeb, db: Session = Depends(get
     lead = get_lead_by_id(db, demo_data.lead_id)
     if not all([assignee, creator, lead]):
         raise HTTPException(status_code=404, detail="Assignee, Creator, or Lead not found")
-    conflicting_event = is_user_available(db, assignee.username, assignee.usernumber, demo_data.start_time, demo_data.end_time)
+
+    start_time_req = demo_data.start_time
+    end_time_req = demo_data.end_time
+
+    if start_time_req.tzinfo is None:
+        start_time_utc_aware = LOCAL_TIMEZONE.localize(start_time_req).astimezone(pytz.utc)
+    else:
+        start_time_utc_aware = start_time_req.astimezone(pytz.utc)
+
+    if end_time_req.tzinfo is None:
+        end_time_utc_aware = LOCAL_TIMEZONE.localize(end_time_req).astimezone(pytz.utc)
+    else:
+        end_time_utc_aware = end_time_req.astimezone(pytz.utc)
+
+    start_time_local_aware = start_time_utc_aware.astimezone(LOCAL_TIMEZONE)
+    start_time_utc_naive = start_time_utc_aware.replace(tzinfo=None)
+    end_time_utc_naive = end_time_utc_aware.replace(tzinfo=None)
+
+    conflicting_event = is_user_available(db, assignee.username, assignee.usernumber, start_time_utc_naive, end_time_utc_naive)
+
     if conflicting_event:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"User '{assignee.username}' is already booked at this time.")
-    new_demo = Demo(lead_id=lead.id, assigned_to=assignee.usernumber, scheduled_by=creator.username, start_time=demo_data.start_time, event_end_time=demo_data.end_time)
+    
+    new_demo = Demo(
+        lead_id=lead.id, 
+        assigned_to=assignee.usernumber, 
+        scheduled_by=creator.username, 
+        start_time=start_time_utc_naive, 
+        event_end_time=end_time_utc_naive
+    )
+    
     db.add(new_demo)
     db.commit()
     db.refresh(new_demo)
-    update_lead_status(
-        db,
-        lead_id=demo_data.lead_id,
-        status="Demo Scheduled",
-        updated_by=creator.username
-    )
+    update_lead_status(db, lead_id=demo_data.lead_id, status="Demo Scheduled", updated_by=creator.username)
 
-    # --- FIX: Send WhatsApp notification for scheduled demo ---
     if assignee.usernumber:
-        time_formatted = new_demo.start_time.strftime('%A, %b %d at %I:%M %p')
+        time_formatted = start_time_local_aware.strftime('%A, %b %d at %I:%M %p')
         contact_name = lead.contacts[0].contact_name if lead.contacts else "N/A"
-        message = (
-            f"📢 *New Demo Scheduled for You*\n\n"
-            f"🏢 *Company:* {lead.company_name}\n"
-            f"👤 *Contact:* {contact_name}\n"
-            f"🕒 *Time:* {time_formatted}\n"
-            f"Scheduled By: {creator.username}"
-        )
+        message = (f"📢 *New Demo Scheduled for You*\n\n🏢 *Company:* {lead.company_name}\n👤 *Contact:* {contact_name}\n🕒 *Time:* {time_formatted}\nScheduled By: {creator.username}")
         send_whatsapp_message(number=assignee.usernumber, message=message)
         logger.info(f"Sent new demo notification to {assignee.username} at {assignee.usernumber}")
 
-    # Create automatic system reminders (hidden from main activity log)
-    time_formatted_reminder = new_demo.start_time.strftime('%A, %b %d at %I:%M %p')
+    time_formatted_reminder = start_time_local_aware.strftime('%A, %b %d at %I:%M %p')
     reminder_message = f"You have a demo scheduled for *{lead.company_name}* on {time_formatted_reminder}."
-
     one_day_before = new_demo.start_time - timedelta(days=1)
     if one_day_before > datetime.utcnow():
-        create_reminder(db, ReminderCreate(
-            lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username,
-            remind_time=one_day_before, message=f"(1 day away) {reminder_message}",
-            is_hidden_from_activity_log=True
-        ))
-
+        create_reminder(db, ReminderCreate(lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username, remind_time=one_day_before, message=f"(1 day away) {reminder_message}", is_hidden_from_activity_log=True))
     one_hour_before = new_demo.start_time - timedelta(hours=1)
     if one_hour_before > datetime.utcnow():
-        create_reminder(db, ReminderCreate(
-            lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username,
-            remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}",
-            is_hidden_from_activity_log=True
-        ))
+        create_reminder(db, ReminderCreate(lead_id=lead.id, user_id=assignee.id, assigned_to=assignee.username, remind_time=one_hour_before, message=f"(in 1 hour) {reminder_message}", is_hidden_from_activity_log=True))
+    
+    if new_demo.start_time and new_demo.start_time.tzinfo is None:
+        new_demo.start_time = pytz.utc.localize(new_demo.start_time)
+    if new_demo.event_end_time and new_demo.event_end_time.tzinfo is None:
+        new_demo.event_end_time = pytz.utc.localize(new_demo.event_end_time)
 
     return new_demo
+
 
 @web_router.post("/demos/complete", response_model=schemas.StatusMessage)
 def post_demo_from_web(data: PostDemoWeb, db: Session = Depends(get_db)):
@@ -564,11 +684,31 @@ def update_lead_from_web(lead_id: int, lead_data: LeadUpdateWeb, db: Session = D
         raise HTTPException(status_code=404, detail="Lead not found")
     return db_lead
 
-
-
-
 @web_router.post("/messages", response_model=MessageMasterOut)
-def api_create_message(message_data: MessageMasterCreate, db: Session = Depends(get_db)):
+def api_create_message_with_file(
+    message_name: str = Form(...),
+    message_content: Optional[str] = Form(None),
+    message_type: str = Form(...),
+    created_by: str = Form(...),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    attachment_filename = None
+    if file:
+        unique_id = uuid.uuid4().hex
+        file_extension = os.path.splitext(file.filename)[1]
+        attachment_filename = f"{unique_id}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIRECTORY, attachment_filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+    message_data = MessageMasterCreate(
+        message_name=message_name,
+        message_content=message_content,
+        message_type=message_type,
+        created_by=created_by,
+        attachment_path=attachment_filename
+    )
     return create_message(db, message_data)
 
 @web_router.get("/messages", response_model=list[MessageMasterOut])
@@ -576,7 +716,34 @@ def api_get_all_messages(db: Session = Depends(get_db)):
     return get_all_messages(db)
 
 @web_router.put("/messages/{message_id}", response_model=MessageMasterOut)
-def api_update_message(message_id: int, message_data: MessageMasterUpdate, db: Session = Depends(get_db)):
+def api_update_message_with_file(
+    message_id: int,
+    message_name: str = Form(...),
+    message_content: Optional[str] = Form(None),
+    message_type: str = Form(...),
+    existing_attachment_path: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    attachment_filename = existing_attachment_path
+    if file:
+        unique_id = uuid.uuid4().hex
+        file_extension = os.path.splitext(file.filename)[1]
+        attachment_filename = f"{unique_id}{file_extension}"
+        file_path = os.path.join(UPLOAD_DIRECTORY, attachment_filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    
+    elif not existing_attachment_path:
+        attachment_filename = None
+
+    message_data = MessageMasterUpdate(
+        message_name=message_name,
+        message_content=message_content,
+        message_type=message_type,
+        attachment_path=attachment_filename
+    )
+
     updated_message = update_message(db, message_id, message_data)
     if not updated_message:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -589,7 +756,6 @@ def api_delete_message(message_id: int, db: Session = Depends(get_db)):
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# --- NEW: Web/Drip Sequence Endpoints ---
 @web_router.post("/drip-sequences", response_model=DripSequenceOut)
 def api_create_drip_sequence(drip_data: DripSequenceCreate, db: Session = Depends(get_db)):
     return create_drip_sequence(db, drip_data)
@@ -621,10 +787,12 @@ def api_delete_drip_sequence(drip_id: int, db: Session = Depends(get_db)):
 
 @web_router.get("/activities/pending", response_model=list[ReminderOut])
 def get_pending_activities(db: Session = Depends(get_db)):
-    """
-    Fetches a list of all pending reminders (scheduled activities).
-    """
     reminders = get_pending_reminders(db)
+    for rem in reminders:
+        if rem.remind_time and rem.remind_time.tzinfo is None:
+            rem.remind_time = pytz.utc.localize(rem.remind_time)
+        if rem.created_at and rem.created_at.tzinfo is None:
+            rem.created_at = pytz.utc.localize(rem.created_at)
     return [ReminderOut.model_validate(rem) for rem in reminders]
 
 @web_router.post("/leads/{lead_id}/activity", response_model=ActivityLogOut)
@@ -665,23 +833,11 @@ def create_activity_with_attachment(
 
     return db_activity
 
-
-
 @web_router.post("/leads/upload-bulk")
 def upload_leads_from_excel(
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
-    """
-    Accepts an Excel file, creates leads with ALL provided details by normalizing
-    column headers, and logs an initial activity for each lead if provided.
-
-    MODIFIED LOGIC:
-    - All fields are now optional except for 'assigned_to'.
-    - A contact record is only created if at least a contact_name or phone is present.
-    - If a 'country' is provided, its country code will be automatically
-      prefixed to the contact's phone number if not already present.
-    """
     success_count = 0
     errors = []
 
@@ -694,7 +850,6 @@ def upload_leads_from_excel(
         column_map = {col.strip().lower(): col for col in df.columns}
 
         def get_value(row, cleaned_name):
-            """A safe way to get a value from a row using the clean name."""
             original_name = column_map.get(cleaned_name)
             if original_name and row[original_name] and str(row[original_name]).strip():
                 return str(row[original_name]).strip()
@@ -702,7 +857,6 @@ def upload_leads_from_excel(
 
         for index, row in df.iterrows():
             try:
-                # 1. VALIDATION: Only 'assigned_to' is mandatory.
                 assignee_name = get_value(row, 'assigned_to')
                 if not assignee_name:
                     raise ValueError("The required field 'assigned_to' is missing or empty.")
@@ -711,7 +865,6 @@ def upload_leads_from_excel(
                 if not assignee_user:
                     raise ValueError(f"Assigned user '{assignee_name}' not found in the database.")
 
-                # 2. Prepare Contact Data (if any exists)
                 contacts_for_lead = []
                 contact_name = get_value(row, 'contact_name')
                 phone_number = get_value(row, 'phone')
@@ -734,55 +887,37 @@ def upload_leads_from_excel(
                             pass
 
                     contact_data = schemas.ContactCreate(
-                        contact_name=contact_name,
-                        phone=final_phone_number,
-                        email=get_value(row, 'email'),
-                        designation=get_value(row, 'designation'),
-                        linkedIn=get_value(row, 'linkedIn'),
-                        pan=get_value(row, 'pan')
+                        contact_name=contact_name, phone=final_phone_number,
+                        email=get_value(row, 'email'), designation=get_value(row, 'designation'),
+                        linkedIn=get_value(row, 'linkedIn'), pan=get_value(row, 'pan')
                     )
                     contacts_for_lead.append(contact_data)
 
-                # 3. Build the main Lead schema
                 lead_data = schemas.LeadCreate(
                     company_name=get_value(row, 'company_name') or f"Unnamed Lead Row {index + 2}",
-                    assigned_to=assignee_user.username,
-                    source=get_value(row, 'source'),
-                    created_by="Bulk Upload",
-                    contacts=contacts_for_lead,
-
-                    email=get_value(row, 'company_email'),
-                    website=get_value(row, 'website'),
-                    linkedIn=get_value(row, 'linkedIn_company'),
-                    phone_2=get_value(row, 'company_phone_2'),
-                    address=get_value(row, 'address'),
-                    address_2=get_value(row, 'address_2'),
-                    city=get_value(row, 'city'),
-                    state=get_value(row, 'state'),
-                    pincode=get_value(row, 'pincode'),
-                    country=get_value(row, 'country'),
-                    turnover=get_value(row, 'turnover'),
-                    challenges=get_value(row, 'challenges'),
+                    assigned_to=assignee_user.username, source=get_value(row, 'source'),
+                    created_by="Bulk Upload", contacts=contacts_for_lead,
+                    email=get_value(row, 'company_email'), website=get_value(row, 'website'),
+                    linkedIn=get_value(row, 'linkedIn_company'), phone_2=get_value(row, 'company_phone_2'),
+                    address=get_value(row, 'address'), address_2=get_value(row, 'address_2'),
+                    city=get_value(row, 'city'), state=get_value(row, 'state'),
+                    pincode=get_value(row, 'pincode'), country=get_value(row, 'country'),
+                    turnover=get_value(row, 'turnover'), challenges=get_value(row, 'challenges'),
                     machine_specification=get_value(row, 'machine_specification'),
                     lead_type=get_value(row, 'lead_type'),
                     team_size=str(get_value(row, 'team_size')) if get_value(row, 'team_size') else None,
-                    segment=get_value(row, 'segment'),
-                    current_system=get_value(row, 'current_system'),
+                    segment=get_value(row, 'segment'), current_system=get_value(row, 'current_system'),
                     remark=get_value(row, 'remark'),
                 )
 
-                # 4. Save the lead
                 saved_lead = save_lead(db, lead_data)
 
-                # 5. Log activity if details are present
                 activity_details = get_value(row, 'activity_details')
                 if activity_details:
                     activity_type = get_value(row, 'activity_type') or 'Note'
                     activity_payload = schemas.ActivityLogCreate(
-                        lead_id=saved_lead.id,
-                        details=activity_details,
-                        phase="new",
-                        activity_type=activity_type
+                        lead_id=saved_lead.id, details=activity_details,
+                        phase="new", activity_type=activity_type
                     )
                     create_activity_log(db, activity_payload)
 
@@ -819,20 +954,34 @@ def assign_drip_sequence_to_lead(
     if not lead.contacts:
         raise HTTPException(status_code=400, detail="Lead has no contacts to send messages to.")
 
-    assignment = assign_drip_to_lead(db, lead_id=lead.id, drip_sequence_id=drip.id)
-
-    day_zero_steps = [step for step in drip.steps if step.day_to_send == 0]
+    assignment = assign_drip_to_lead(db, lead.id, drip.id)
 
     sent_count = 0
-    if day_zero_steps:
+    if drip.steps:
+        sorted_steps = sorted(drip.steps, key=lambda s: (s.day_to_send, s.sequence_order))
+        first_step = sorted_steps[0]
+        
         primary_contact = lead.contacts[0]
-        for step in day_zero_steps:
-            message_content = step.message.message_content
-            if message_content:
-                success = send_whatsapp_message(number=primary_contact.phone, message=message_content)
-                if success:
-                    log_sent_drip_message(db, assignment_id=assignment.id, step_id=step.id)
-                    sent_count += 1
+        first_message = first_step.message
+        
+        success = False
+        if first_message.message_type == 'text':
+            if first_message.message_content:
+                success = send_whatsapp_message(number=primary_contact.phone, message=first_message.message_content)
+        else:
+            if first_message.attachment_path:
+                caption = first_message.message_content or first_message.message_name
+                success = send_whatsapp_message_with_media(
+                    number=primary_contact.phone,
+                    file_path=first_message.attachment_path,
+                    caption=caption,
+                    message_type=first_message.message_type
+                )
+
+        if success:
+            log_sent_drip_message(db, assignment_id=assignment.id, step_id=first_step.id)
+            sent_count += 1
+            logger.info(f"Sent initial drip message (Step ID: {first_step.id}) to {lead.company_name}")
 
     return {
         "status": "success",
@@ -847,9 +996,6 @@ def schedule_activity_from_web(
     activity_data: ScheduleActivityWeb,
     db: Session = Depends(get_db)
 ):
-    """
-    Schedules a new activity (reminder) and correctly converts the time to UTC before saving.
-    """
     creator = get_user_by_id(db, activity_data.created_by_user_id)
     if not creator:
         raise HTTPException(status_code=404, detail="Creating user not found.")
@@ -858,33 +1004,22 @@ def schedule_activity_from_web(
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found for scheduling activity.")
 
-    # 1. Parse the time from the text. This will be a naive datetime object in the server's local time.
     remind_time_local_naive = parse_datetime_from_text(activity_data.details)
     
-    # --- THIS IS THE FIX ---
-    # 2. Convert the naive local time to an aware UTC time for correct storage.
     try:
-        # Assume the server's local timezone is IST for this conversion.
-        local_tz = pytz.timezone('Asia/Kolkata')
-        # Make the naive local time aware of its timezone
-        remind_time_local_aware = local_tz.localize(remind_time_local_naive)
-        # Convert the aware local time to aware UTC time
+        remind_time_local_aware = LOCAL_TIMEZONE.localize(remind_time_local_naive)
         remind_time_utc_aware = remind_time_local_aware.astimezone(pytz.utc)
-        # Make it naive again for storage, as the DB column doesn't store timezone info.
         remind_time_utc_naive = remind_time_utc_aware.replace(tzinfo=None)
     except Exception as e:
         logger.error(f"Timezone conversion failed: {e}. Falling back to naive time.")
-        remind_time_utc_naive = remind_time_local_naive # Fallback
+        remind_time_utc_naive = remind_time_local_naive
 
     message_for_reminder = f"For {lead.company_name}: {activity_data.details}"
 
     reminder_payload = ReminderCreate(
-        lead_id=activity_data.lead_id,
-        remind_time=remind_time_utc_naive, # Use the corrected UTC time
-        message=message_for_reminder,
-        assigned_to=creator.username,
-        user_id=creator.id,
-        activity_type=activity_data.activity_type,
+        lead_id=activity_data.lead_id, remind_time=remind_time_utc_naive,
+        message=message_for_reminder, assigned_to=creator.username,
+        user_id=creator.id, activity_type=activity_data.activity_type,
         is_hidden_from_activity_log=False
     )
 
@@ -892,16 +1027,15 @@ def schedule_activity_from_web(
     if not db_reminder:
         raise HTTPException(status_code=500, detail="Failed to create reminder.")
         
+    if db_reminder.remind_time and db_reminder.remind_time.tzinfo is None:
+        db_reminder.remind_time = pytz.utc.localize(db_reminder.remind_time)
+    if db_reminder.created_at and db_reminder.created_at.tzinfo is None:
+        db_reminder.created_at = pytz.utc.localize(db_reminder.created_at)
+
     return db_reminder
-
-
 
 @web_router.get("/activities/all/{username}", response_model=List[UnifiedActivityOut])
 def get_all_activities_for_user(username: str, db: Session = Depends(get_db)):
-    """
-    Fetches a unified list of all logged and scheduled activities for a user.
-    This is the endpoint that the new Activity Management page calls.
-    """
     user = get_user_by_username(db, username)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -910,16 +1044,25 @@ def get_all_activities_for_user(username: str, db: Session = Depends(get_db)):
 
     activities = get_all_unified_activities(db, username=username, is_admin=is_admin)
 
-    return activities
+    processed_activities = []
+    for activity in activities:
+        activity_data = dict(activity._mapping) 
+        
+        if activity_data.get('scheduled_for') and activity_data['scheduled_for'].tzinfo is None:
+            activity_data['scheduled_for'] = pytz.utc.localize(activity_data['scheduled_for'])
+            
+        if activity_data.get('created_at') and activity_data['created_at'].tzinfo is None:
+            activity_data['created_at'] = pytz.utc.localize(activity_data['created_at'])
+            
+        processed_activities.append(activity_data)
+    
+    return processed_activities
 
 @web_router.post("/activities/log", response_model=ActivityLogOut)
 def log_activity_from_web(
     activity_data: ActivityLogCreate,
     db: Session = Depends(get_db)
 ):
-    """
-    Logs a completed activity directly from the web application.
-    """
     lead = get_lead_by_id(db, activity_data.lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found for activity logging.")
@@ -928,58 +1071,21 @@ def log_activity_from_web(
 
     return db_activity
 
-@web_router.get("/attachments/preview/{file_path:path}")
+@web_router.api_route("/attachments/preview/{file_path:path}", methods=["GET", "HEAD"], tags=["Attachments"])
 async def preview_attachment(file_path: str):
-    """
-    A proxy endpoint to serve attachment files and bypass Ngrok browser warnings in iframes.
-    """
-    internal_file_url = f"http://127.0.0.1:8000/attachments/{file_path}"
+    full_file_path = os.path.join(UPLOAD_DIRECTORY, file_path)
 
-    async with httpx.AsyncClient() as client:
-        try:
-            headers = {"ngrok-skip-browser-warning": "true"}
-            response = await client.get(internal_file_url, headers=headers, follow_redirects=True)
+    if not os.path.isfile(full_file_path):
+        logger.error(f"Attachment not found at path: {full_file_path}")
+        raise HTTPException(status_code=404, detail="File not found")
 
-            if response.status_code == 200:
-                return StreamingResponse(response.iter_bytes(), media_type=response.headers.get("Content-Type"))
-            else:
-                return Response(status_code=response.status_code)
-        except httpx.RequestError as e:
-            logger.error(f"Failed to proxy attachment {file_path}: {e}")
-            raise HTTPException(status_code=500, detail="Could not retrieve the file.")
-
-
-
-@web_router.post("/meetings/complete")
-def post_meeting_from_web(data: PostMeetingWeb, db: Session = Depends(get_db)):
-    """
-    Handles completing a meeting from the web UI.
-    Receives the meeting_id, notes, and the user who updated it.
-    """
-    event = complete_meeting(
-        db=db,
-        meeting_id=data.meeting_id,
-        notes=data.notes,
-        updated_by=data.updated_by
-    )
-
-    if not event:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Meeting with ID {data.meeting_id} not found or already completed."
-        )
-
-    return {"status": "success", "message": f"Meeting {data.meeting_id} has been marked as complete."}
+    return FileResponse(path=full_file_path)
 
 @web_router.post("/leads/export-excel")
 async def export_leads_to_excel(
     lead_ids: List[int],
     db: Session = Depends(get_db)
 ):
-    """
-    Exports specified leads to an Excel file. If a lead has multiple contacts,
-    it creates a separate row for each contact, duplicating the lead's info.
-    """
     if not lead_ids:
         raise HTTPException(status_code=400, detail="No lead IDs provided for export.")
 
@@ -991,39 +1097,24 @@ async def export_leads_to_excel(
     records = []
     for lead in leads_to_export:
         lead_base_info = {
-            "company_name": lead.company_name,
-            "assigned_to": lead.assigned_to,
-            "source": lead.source,
-            "company_email": lead.email,
-            "website": lead.website,
-            "linkedIn_company": lead.linkedIn,
-            "company_phone_2": lead.phone_2,
-            "address line": lead.address,
-            "address Line 2": lead.address_2,
-            "city": lead.city,
-            "state": lead.state,
-            "country": lead.country,
-            "pincode": lead.pincode,
-            "turnover": lead.turnover,
-            "team_size": lead.team_size,
-            "segment": lead.segment,
-            "current_system": lead.current_system,
-            "challenges": lead.challenges,
-            "machine_specification": lead.machine_specification,
-            "lead_type": lead.lead_type,
-            "Remark": lead.remark,
+            "company_name": lead.company_name, "assigned_to": lead.assigned_to,
+            "source": lead.source, "company_email": lead.email, "website": lead.website,
+            "linkedIn_company": lead.linkedIn, "company_phone_2": lead.phone_2,
+            "address line": lead.address, "address Line 2": lead.address_2,
+            "city": lead.city, "state": lead.state, "country": lead.country,
+            "pincode": lead.pincode, "turnover": lead.turnover, "team_size": lead.team_size,
+            "segment": lead.segment, "current_system": lead.current_system,
+            "challenges": lead.challenges, "machine_specification": lead.machine_specification,
+            "lead_type": lead.lead_type, "Remark": lead.remark,
         }
 
         if lead.contacts:
             for contact in lead.contacts:
                 record = lead_base_info.copy()
                 record.update({
-                    "contact_name": contact.contact_name,
-                    "phone": contact.phone,
-                    "designation": contact.designation,
-                    "email": contact.email,
-                    "linkedIn_contact": contact.linkedIn,
-                    "pan": contact.pan
+                    "contact_name": contact.contact_name, "phone": contact.phone,
+                    "designation": contact.designation, "email": contact.email,
+                    "linkedIn_contact": contact.linkedIn, "pan": contact.pan
                 })
                 records.append(record)
         else:
@@ -1062,10 +1153,6 @@ def mark_scheduled_activity_as_done(
     payload: MarkActivityDonePayload,
     db: Session = Depends(get_db)
 ):
-    """
-    Handles completing a scheduled activity (a reminder) from the web UI.
-    Receives the reminder_id, notes, and the user who updated it.
-    """
     completed_reminder = complete_scheduled_activity(
         db=db,
         reminder_id=reminder_id,
@@ -1080,6 +1167,18 @@ def mark_scheduled_activity_as_done(
         )
 
     return {"status": "success", "message": f"Activity {reminder_id} has been marked as complete."}
+
+class ReportQuery(BaseModel):
+    user_id: int
+    start_date: date
+    end_date: date
+
+@web_router.post("/reports/user-performance", tags=["Reports"])
+def get_user_performance_report(query: ReportQuery, db: Session = Depends(get_db)):
+    report_data = generate_user_performance_data(db, query.user_id, query.start_date, query.end_date)
+    if not report_data:
+        raise HTTPException(status_code=404, detail="User not found or failed to generate data.")
+    return report_data
 
 @web_router.put("/meetings/{meeting_id}/reschedule", response_model=EventOut, tags=["Events"])
 def api_reschedule_meeting(meeting_id: int, payload: EventReschedulePayload, db: Session = Depends(get_db)):
@@ -1112,8 +1211,6 @@ def api_update_meeting_notes(meeting_id: int, payload: EventNotesUpdatePayload, 
         raise HTTPException(status_code=404, detail="Completed meeting not found.")
     return updated_meeting
 
-# --- NEW: Endpoints for Managing Demos ---
-
 @web_router.put("/demos/{demo_id}/reschedule", response_model=DemoOut, tags=["Events"])
 def api_reschedule_demo(demo_id: int, payload: EventReschedulePayload, db: Session = Depends(get_db)):
     updated_demo = reschedule_demo(db, demo_id, payload.start_time, payload.end_time, payload.updated_by)
@@ -1144,8 +1241,6 @@ def api_update_demo_notes(demo_id: int, payload: EventNotesUpdatePayload, db: Se
     if not updated_demo:
         raise HTTPException(status_code=404, detail="Completed demo not found.")
     return updated_demo
-
-# --- NEW: Endpoints for Managing Activities ---
 
 @web_router.put("/activities/log/{activity_id}", response_model=ActivityLogOut, tags=["Activities"])
 def api_update_activity(activity_id: int, payload: ActivityLogUpdate, db: Session = Depends(get_db)):
@@ -1184,34 +1279,55 @@ def api_cancel_scheduled_activity(reminder_id: int, db: Session = Depends(get_db
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# --- GOOGLE CALENDAR INTEGRATION ENDPOINTS ---
-
 @web_router.get("/calendar/events/all", tags=["Calendar"])
 def get_all_crm_events(db: Session = Depends(get_db)):
-    all_meetings = db.query(models.Event).filter(models.Event.phase.in_(['Scheduled', 'Rescheduled'])).all()
-    all_demos = db.query(models.Demo).filter(models.Demo.phase.in_(['Scheduled', 'Rescheduled'])).all()
+    statuses_to_show = ['Scheduled', 'Rescheduled', 'Done']
+    all_meetings = db.query(models.Event).options(joinedload(models.Event.lead)).filter(models.Event.phase.in_(statuses_to_show)).all()
+    all_demos = db.query(models.Demo).options(joinedload(models.Demo.lead)).filter(models.Demo.phase.in_(statuses_to_show)).all()
 
     all_users = db.query(User).all()
     user_map = {user.usernumber: user.username for user in all_users}
     events = []
 
     for meeting in all_meetings:
+        aware_start = pytz.utc.localize(meeting.event_time) if meeting.event_time else None
+        
+        if meeting.event_end_time:
+            aware_end = pytz.utc.localize(meeting.event_end_time)
+        elif aware_start:
+            aware_end = aware_start + timedelta(hours=1)
+        else:
+            aware_end = None
+
+        if not aware_start or not aware_end: continue
+
         events.append({
             "id": f"meeting-{meeting.id}",
             "title": f"Meeting: {meeting.lead.company_name if meeting.lead else 'N/A'}",
-            "start": meeting.event_time.isoformat(),
-            "end": meeting.event_end_time.isoformat() if meeting.event_end_time else (meeting.event_time + timedelta(hours=1)).isoformat(),
-            "extendedProps": { "type": "Meeting", "assignee": meeting.assigned_to }
+            "start": aware_start.isoformat(),
+            "end": aware_end.isoformat(),
+            "extendedProps": { "type": "Meeting", "assignee": meeting.assigned_to, "status": meeting.phase }
         })
 
     for demo in all_demos:
+        aware_start = pytz.utc.localize(demo.start_time) if demo.start_time else None
+        
+        if demo.event_end_time:
+            aware_end = pytz.utc.localize(demo.event_end_time)
+        elif aware_start:
+            aware_end = aware_start + timedelta(hours=1)
+        else:
+            aware_end = None
+        
+        if not aware_start or not aware_end: continue
+
         assignee_name = user_map.get(demo.assigned_to, 'Unknown User')
         events.append({
             "id": f"demo-{demo.id}",
             "title": f"Demo: {demo.lead.company_name if demo.lead else 'N/A'}",
-            "start": demo.start_time.isoformat(),
-            "end": demo.event_end_time.isoformat() if demo.event_end_time else (demo.start_time + timedelta(hours=1)).isoformat(),
-            "extendedProps": { "type": "Demo", "assignee": assignee_name }
+            "start": aware_start.isoformat(),
+            "end": aware_end.isoformat(),
+            "extendedProps": { "type": "Demo", "assignee": assignee_name, "status": demo.phase }
         })
 
     return events
@@ -1219,25 +1335,20 @@ def get_all_crm_events(db: Session = Depends(get_db)):
 
 @web_router.get("/calendar/subscribe/{user_id}", tags=["Calendar"])
 def subscribe_to_calendar(user_id: int, db: Session = Depends(get_db)):
-    """
-    Generates a synchronized iCalendar (.ics) file for a specific user,
-    including caching headers to encourage frequent updates from Google.
-    """
     user = get_user_by_id(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    LOCAL_TIMEZONE = pytz.timezone('Asia/Kolkata')
     utc = pytz.utc
     cal = Calendar()
 
     user_meetings = db.query(models.Event).filter(
-        or_(models.Event.assigned_to == user.username, models.Event.assigned_to == user.usernumber),
+        models.Event.assigned_to == user.username,
         models.Event.phase.in_(['Scheduled', 'Rescheduled'])
     ).all()
 
     user_demos = db.query(models.Demo).filter(
-        or_(models.Demo.assigned_to == user.usernumber, models.Demo.assigned_to == user.username),
+        models.Demo.assigned_to == user.usernumber,
         models.Demo.phase.in_(['Scheduled', 'Rescheduled'])
     ).all()
 
@@ -1245,11 +1356,12 @@ def subscribe_to_calendar(user_id: int, db: Session = Depends(get_db)):
         event = ICSEvent()
         event.name = f"CRM Meeting: {meeting.lead.company_name if meeting.lead else 'N/A'}"
         naive_begin = meeting.event_time
-        aware_begin = LOCAL_TIMEZONE.localize(naive_begin).astimezone(utc)
-        event.begin = aware_begin
+        aware_utc_begin = pytz.utc.localize(naive_begin)
+        event.begin = aware_utc_begin
+
         naive_end = meeting.event_end_time or (naive_begin + timedelta(hours=1))
-        aware_end = LOCAL_TIMEZONE.localize(naive_end).astimezone(utc)
-        event.end = aware_end
+        aware_utc_end = pytz.utc.localize(naive_end)
+        event.end = aware_utc_end
         event.description = (f"Type: {meeting.meeting_type or 'Meeting'}\n"
                              f"Lead: {meeting.lead.company_name if meeting.lead else 'N/A'}\n"
                              f"Assigned to: {user.username}\n"
@@ -1261,11 +1373,12 @@ def subscribe_to_calendar(user_id: int, db: Session = Depends(get_db)):
         event = ICSEvent()
         event.name = f"CRM Demo: {demo.lead.company_name if demo.lead else 'N/A'}"
         naive_begin = demo.start_time
-        aware_begin = LOCAL_TIMEZONE.localize(naive_begin).astimezone(utc)
-        event.begin = aware_begin
+        aware_utc_begin = pytz.utc.localize(naive_begin)
+        event.begin = aware_utc_begin
+
         naive_end = demo.event_end_time or (naive_begin + timedelta(hours=1))
-        aware_end = LOCAL_TIMEZONE.localize(naive_end).astimezone(utc)
-        event.end = aware_end
+        aware_utc_end = pytz.utc.localize(naive_end)
+        event.end = aware_utc_end
         event.description = (f"Type: Demo\n"
                              f"Lead: {demo.lead.company_name if demo.lead else 'N/A'}\n"
                              f"Assigned to: {user.username}\n"
@@ -1279,8 +1392,11 @@ def subscribe_to_calendar(user_id: int, db: Session = Depends(get_db)):
 
     headers = {
         'Content-Type': 'text/calendar',
-        'Cache-Control': 'must-revalidate, max-age=600', # 600 seconds = 10 minutes
+        'Cache-Control': 'must-revalidate, max-age=600',
         'ETag': etag
     }
 
     return Response(content=calendar_content, headers=headers)
+
+app.include_router(main_router)
+app.include_router(web_router, prefix="/web")

@@ -60,6 +60,7 @@ class ClientContactOut(ClientContactBase):
 # ---------------- USER SCHEMAS ----------------
 class UserCreate(BaseModel):
     username: str
+    company_name: str
     usernumber: str
     email: Optional[str] = None
     department: Optional[str] = None
@@ -69,6 +70,7 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    company_name: str
 
 class UserPasswordChange(BaseModel):
     username: str
@@ -85,6 +87,7 @@ class UserUpdate(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    company_name: str
     usernumber: str
     email: Optional[str]
     department: Optional[str]

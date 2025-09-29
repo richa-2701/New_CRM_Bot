@@ -1,7 +1,12 @@
-# reminders.py
+# app/reminders.py
+
 from datetime import datetime, date, time, timedelta
 from sqlalchemy.orm import Session
-from app.db import SessionLocal
+# --- START OF CHANGE ---
+# REMOVED: from app.db import SessionLocal
+# ADDED: New imports for multi-tenant database handling
+from app.db import get_db_session_for_company, COMPANY_TO_ENV_MAP
+# --- END OF CHANGE ---
 from app.models import Reminder, User, LeadDripAssignment
 from app.message_sender import send_whatsapp_message
 from app.crud import get_active_drip_assignments, get_sent_step_ids_for_assignment, log_sent_drip_message
@@ -17,6 +22,10 @@ def schedule_reminder(
     message: str,
     remind_at: datetime,
 ):
+    """
+    This function does NOT need to change. It is called from endpoints that
+    already have a database session for a specific company.
+    """
     reminder = Reminder(
         lead_id=lead_id,
         user_id=user_id,
@@ -33,109 +42,144 @@ def schedule_reminder(
 
 async def reminder_loop():
     """
-    A continuous loop that runs in the background to check for and send due reminders.
-    This version includes critical fixes for timezone handling and API calls.
+    A continuous loop that runs in the background to check for and send due reminders
+    across ALL configured company databases.
     """
     while True:
-        db = SessionLocal()
-        try:
-            now = datetime.utcnow()
+        logger.info("⏰ Starting reminder check cycle for all companies...")
+        
+        # --- START OF CHANGE: Multi-Tenant Loop ---
+        # Get the list of all company names from the configuration map in db.py
+        all_companies = list(COMPANY_TO_ENV_MAP.keys())
+        
+        for company in all_companies:
+            logger.info(f"-> Checking reminders for company: '{company}'")
             
-            due_reminders_with_users = (
-                db.query(Reminder, User.usernumber)
-                .join(User, Reminder.user_id == User.id)
-                .filter(
-                    Reminder.remind_time <= now, 
-                    Reminder.status == "pending",
-                    Reminder.is_hidden_from_activity_log == False
+            # Manually get a database session specifically for this company.
+            db: Session = get_db_session_for_company(company)
+            
+            try:
+                now = datetime.utcnow()
+                
+                # This query now runs on the correct company's database
+                due_reminders_with_users = (
+                    db.query(Reminder, User.usernumber)
+                    .join(User, Reminder.user_id == User.id)
+                    .filter(
+                        Reminder.remind_time <= now, 
+                        Reminder.status == "pending",
+                        Reminder.is_hidden_from_activity_log == False
+                    )
+                    .all()
                 )
-                .all()
-            )
 
-            if due_reminders_with_users:
-                logger.info(f"Found {len(due_reminders_with_users)} due reminders to send.")
+                if due_reminders_with_users:
+                    logger.info(f"   Found {len(due_reminders_with_users)} due reminders for '{company}'.")
 
-            for reminder, user_phone in due_reminders_with_users:
-                try:
-                    if not user_phone:
-                        logger.warning(f"Skipping reminder ID {reminder.id} because user {reminder.user_id} has no phone number.")
+                for reminder, user_phone in due_reminders_with_users:
+                    try:
+                        if not user_phone:
+                            logger.warning(f"   Skipping reminder ID {reminder.id} for '{company}' because user {reminder.user_id} has no phone number.")
+                            reminder.status = "failed"
+                            continue
+
+                        success = send_whatsapp_message(number=user_phone, message=f"⏰ Reminder: {reminder.message}")
+                        
+                        if success:
+                            reminder.status = "sent"
+                            logger.info(f"   ✅ Sent reminder ID {reminder.id} for '{company}' to {user_phone}")
+                        else:
+                            reminder.status = "failed"
+                            logger.error(f"   ❌ Failed to send reminder ID {reminder.id} for '{company}' via WhatsApp API.")
+
+                    except Exception as e:
                         reminder.status = "failed"
-                        continue
+                        logger.error(f"   ❌ Exception sending reminder ID {reminder.id} for '{company}': {e}", exc_info=True)
+                    finally:
+                        db.commit() # Commit the status change for each individual reminder
 
-                    success = send_whatsapp_message(number=user_phone, message=f"⏰ Reminder: {reminder.message}")
-                    
-                    if success:
-                        reminder.status = "sent"
-                        logger.info(f"✅ Sent reminder ID {reminder.id} for lead_id={reminder.lead_id} to {user_phone}")
-                    else:
-                        reminder.status = "failed"
-                        logger.error(f"❌ Failed to send reminder ID {reminder.id} via WhatsApp API.")
+            except Exception as outer_e:
+                logger.error(f"⚠️ An error occurred in the reminder loop for company '{company}': {outer_e}", exc_info=True)
+                db.rollback()
+            finally:
+                # This is CRITICAL. Always close the session to prevent connection leaks.
+                db.close()
+                logger.info(f"   Session closed for '{company}'.")
+        # --- END OF CHANGE ---
 
-                except Exception as e:
-                    reminder.status = "failed"
-                    logger.error(f"❌ Exception sending reminder ID {reminder.id}: {e}", exc_info=True)
-                finally:
-                    db.commit()
-
-        except Exception as outer_e:
-            logger.error(f"⚠️ An error occurred in the reminder loop: {outer_e}", exc_info=True)
-            db.rollback()
-        finally:
-            db.close()
-
+        logger.info("Finished reminder cycle. Waiting for 60 seconds.")
         await asyncio.sleep(60)
 
 
 
 async def drip_campaign_loop():
-    """A continuous background loop to process and send drip campaign messages."""
+    """
+    A continuous background loop to process and send drip campaign messages
+    across ALL configured company databases.
+    """
     while True:
-        db = SessionLocal()
-        try:
-            today = date.today()
-            now = datetime.utcnow().time()
-            
-            active_assignments = get_active_drip_assignments(db)
-            
-            for assignment in active_assignments:
-                days_passed = (today - assignment.start_date).days
+        logger.info("💧 Starting drip campaign check cycle for all companies...")
+
+        # --- START OF CHANGE: Multi-Tenant Loop ---
+        all_companies = list(COMPANY_TO_ENV_MAP.keys())
+
+        for company in all_companies:
+            logger.info(f"-> Checking drip campaigns for company: '{company}'")
+            db: Session = get_db_session_for_company(company)
+
+            try:
+                today = date.today()
+                now = datetime.utcnow().time()
                 
-                if not assignment.lead or not assignment.lead.contacts:
-                    logger.warning(f"Skipping drip assignment {assignment.id} for lead {assignment.lead_id} due to missing data.")
-                    continue
+                # This query now runs on the correct company's database
+                active_assignments = get_active_drip_assignments(db)
+                
+                if not active_assignments:
+                    logger.info(f"   No active drip campaigns found for '{company}'.")
 
-                sent_step_ids = get_sent_step_ids_for_assignment(db, assignment.id)
+                for assignment in active_assignments:
+                    days_passed = (today - assignment.start_date).days
+                    
+                    if not assignment.lead or not assignment.lead.contacts:
+                        logger.warning(f"   Skipping drip assignment {assignment.id} for lead {assignment.lead_id} in '{company}' due to missing data.")
+                        continue
 
-                steps_to_process = [
-                    step for step in assignment.drip_sequence.steps
-                    if step.id not in sent_step_ids and step.day_to_send <= days_passed
-                ]
+                    sent_step_ids = get_sent_step_ids_for_assignment(db, assignment.id)
 
-                for step in steps_to_process:
-                    try:
-                        scheduled_time = time.fromisoformat(str(step.time_to_send))
-                        
-                        if step.day_to_send < days_passed or (step.day_to_send == days_passed and now >= scheduled_time):
-                            message_content = step.message.message_content
+                    steps_to_process = [
+                        step for step in assignment.drip_sequence.steps
+                        if step.id not in sent_step_ids and step.day_to_send <= days_passed
+                    ]
+
+                    for step in steps_to_process:
+                        try:
+                            scheduled_time = time.fromisoformat(str(step.time_to_send))
                             
-                            primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
-                            if primary_contact and message_content:
-                                success = send_whatsapp_message(
-                                    number=primary_contact.phone,
-                                    message=message_content
-                                )
-                                if success:
-                                    log_sent_drip_message(db, assignment_id=assignment.id, step_id=step.id)
-                                    logger.info(f"Sent drip message step {step.id} to lead {assignment.lead_id}.")
-                                else:
-                                    logger.error(f"Failed to send drip message step {step.id} to lead {assignment.lead_id}.")
-                    except Exception as step_e:
-                        logger.error(f"Error processing step {step.id} for assignment {assignment.id}: {step_e}", exc_info=True)
+                            if step.day_to_send < days_passed or (step.day_to_send == days_passed and now >= scheduled_time):
+                                message_content = step.message.message_content
+                                
+                                primary_contact = assignment.lead.contacts[0] if assignment.lead.contacts else None
+                                if primary_contact and message_content:
+                                    success = send_whatsapp_message(
+                                        number=primary_contact.phone,
+                                        message=message_content
+                                    )
+                                    if success:
+                                        log_sent_drip_message(db, assignment_id=assignment.id, step_id=step.id)
+                                        logger.info(f"   Sent drip message step {step.id} to lead {assignment.lead_id} in '{company}'.")
+                                    else:
+                                        logger.error(f"   Failed to send drip message step {step.id} to lead {assignment.lead_id} in '{company}'.")
+                        except Exception as step_e:
+                            logger.error(f"   Error processing step {step.id} for assignment {assignment.id} in '{company}': {step_e}", exc_info=True)
 
-        except Exception as outer_e:
-            logger.error(f"⚠️ An error occurred in the drip campaign loop: {outer_e}", exc_info=True)
-            db.rollback()
-        finally:
-            db.close()
-
+            except Exception as outer_e:
+                logger.error(f"⚠️ An error occurred in the drip campaign loop for '{company}': {outer_e}", exc_info=True)
+                db.rollback()
+            finally:
+                # CRITICAL: Always close the session.
+                db.close()
+                logger.info(f"   Session closed for '{company}'.")
+        # --- END OF CHANGE ---
+        
+        logger.info("Finished drip campaign cycle. Waiting for 5 minutes.")
         await asyncio.sleep(300)

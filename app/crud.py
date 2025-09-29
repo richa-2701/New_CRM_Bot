@@ -3,7 +3,7 @@ from datetime import datetime, date
 from typing import Optional, Union, List
 from sqlalchemy.orm import Session, aliased
 import re
-from sqlalchemy import func, union_all, literal_column, case
+from sqlalchemy import func, union_all, literal_column, case, and_ ,or_
 from app import models, schemas
 from app.schemas import (
     UserCreate, UserPasswordChange, LeadCreate, LeadUpdateWeb, EventCreate,
@@ -17,6 +17,8 @@ from app.models import (
     LeadDripAssignment, SentDripMessageLog, DripSequenceStep,
     Client, ClientContact
 )
+import secrets
+import string
 
 def get_master_data_by_category(db: Session, category: str):
     return db.query(models.MasterData).filter(models.MasterData.category == category, models.MasterData.is_active == True).order_by(models.MasterData.value).all()
@@ -39,6 +41,7 @@ def delete_master_data(db: Session, item_id: int) -> bool:
 def create_user(db: Session, user: UserCreate):
     db_user = models.User(
         username=user.username,
+        company_name=user.company_name,
         usernumber=user.usernumber,
         email=user.email,
         department=user.department,
@@ -60,8 +63,32 @@ def get_user_by_username(db: Session, username: str):
     return db.query(models.User).filter(models.User.username == username).first()
 
 def get_user_by_phone(db: Session, phone: Union[str, int]):
-    phone_str = str(phone)
-    return db.query(User).filter(User.usernumber == phone_str.strip()).first()
+    """
+    Finds a user by their phone number, checking for common format variations.
+    - With and without a leading '+'
+    - The last 10 digits of the number
+    """
+    if not phone:
+        return None
+        
+    phone_str = str(phone).strip()
+    
+    # Sanitize the number by keeping only digits
+    sanitized_phone = ''.join(filter(str.isdigit, phone_str))
+
+    # Create a list of possible formats to check
+    possible_formats = {sanitized_phone} # Use a set to store unique formats
+    
+    # Add format with a '+' if it doesn't have one
+    if not sanitized_phone.startswith('+'):
+        possible_formats.add(f"+{sanitized_phone}")
+
+    # If the number is long (like a country code + number), also check for the last 10 digits
+    if len(sanitized_phone) > 10:
+        possible_formats.add(sanitized_phone[-10:])
+
+    # Query the database to find a match for any of the possible formats
+    return db.query(User).filter(User.usernumber.in_(list(possible_formats))).first()
 
 def verify_user(db: Session, username: str, password: str) -> Optional[models.User]:
     user = get_user_by_username(db, username)
@@ -181,11 +208,9 @@ def save_lead(db: Session, lead_data: schemas.LeadCreate) -> models.Lead:
     )
 
     db.add(db_lead)
-    # Commit here to get an ID for the lead, which is needed for the contacts
     db.commit()
     db.refresh(db_lead)
 
-    # Now, loop through the contact data and add contacts
     for contact_pydantic in lead_data.contacts:
         contact_dict = contact_pydantic.model_dump()
 
@@ -225,20 +250,17 @@ def update_lead(db: Session, lead_id: int, lead_data: schemas.LeadUpdateWeb):
 
     update_data = lead_data.model_dump(exclude_unset=True)
 
-    # --- STEP 1: Separate the special fields from the simple ones ---
     contacts_data = update_data.pop("contacts", None)
     new_status = update_data.pop("status", None)
     activity_details = update_data.pop("activity_details", None)
     activity_type = update_data.pop("activity_type", "General")
 
-    # --- STEP 2: Update all the simple, direct fields on the lead model ---
     for key, value in update_data.items():
         if hasattr(db_lead, key):
             setattr(db_lead, key, value)
 
     db_lead.updated_at = datetime.utcnow()
 
-    # --- STEP 3: Handle contact updates (delete and recreate for simplicity) ---
     if contacts_data is not None:
         db.query(Contact).filter(Contact.lead_id == lead_id).delete(synchronize_session=False)
         for contact_info in contacts_data:
@@ -253,12 +275,7 @@ def update_lead(db: Session, lead_id: int, lead_data: schemas.LeadUpdateWeb):
             )
             db.add(new_contact)
 
-    # --- STEP 4: Centralized and intelligent activity logging ---
-    # We prioritize the status change log, as it's the most important event.
     if new_status and new_status != db_lead.status:
-        # If the status is different, call the specialized function.
-        # It handles both the status update and the logging in one go.
-        # We pass `activity_details` as the remark for a richer log message.
         update_lead_status(
             db=db,
             lead_id=lead_id,
@@ -267,8 +284,6 @@ def update_lead(db: Session, lead_id: int, lead_data: schemas.LeadUpdateWeb):
             remark=activity_details
         )
     elif activity_details:
-        # ONLY if the status did NOT change, but we have new notes,
-        # we log a simple activity.
         create_activity_log(db, schemas.ActivityLogCreate(
             lead_id=lead_id,
             phase=db_lead.status, # Log against the current status
@@ -288,20 +303,16 @@ def update_lead_status(db: Session, lead_id: int, status: str, updated_by: str, 
         old_status = lead.status
         lead.status = status
 
-        # Construct the activity details. Start with the status change.
         activity_details = f"Status changed from '{old_status}' to '{status}' by {updated_by}."
 
-        # If a remark (from activity_details) was also provided, append it.
         if remark:
             activity_details += f"\nNote: {remark}"
 
-        # Create a single, comprehensive log entry.
         create_activity_log(db, schemas.ActivityLogCreate(
             lead_id=lead.id,
             phase=status,
             details=activity_details,
         ))
-        # Note: We do not need to commit here because the calling function (`update_lead`) will commit.
     return lead
 
 def create_event(db: Session, event: schemas.EventCreate):
@@ -364,19 +375,13 @@ def create_assignment_log(db: Session, log: schemas.AssignmentLogCreate):
     return db_log
 
 def is_user_available(db: Session, username: str, user_phone: str, start_time: datetime, end_time: datetime, exclude_event_id: int = None, exclude_demo_id: int = None) -> Optional[Union[Event, Demo]]:
-    """
-    Checks for conflicting events in a database-agnostic way by making all datetimes
-    timezone-naive before comparison. This works reliably on SQLite, PostgreSQL, and MySQL.
-    """
-    start_time_naive = start_time.replace(tzinfo=None)
-    end_time_naive = end_time.replace(tzinfo=None)
-
-    # --- Check for conflicting MEETINGS (assigned by username) ---
+    # --- START OF FIX: This function now expects NAIVE UTC datetimes ---
+    
     meeting_conflict_query = db.query(models.Event).filter(
         models.Event.assigned_to == username,
-        models.Event.event_time < end_time_naive,
-        models.Event.event_end_time > start_time_naive,
-        models.Event.phase == "Scheduled"
+        models.Event.event_time < end_time,
+        models.Event.event_end_time > start_time,
+        models.Event.phase.in_(["Scheduled", "Rescheduled"])
     )
     if exclude_event_id:
         meeting_conflict_query = meeting_conflict_query.filter(models.Event.id != exclude_event_id)
@@ -385,12 +390,11 @@ def is_user_available(db: Session, username: str, user_phone: str, start_time: d
     if conflicting_meeting:
         return conflicting_meeting
 
-    # --- Check for conflicting DEMOS (assigned by usernumber/phone) ---
     demo_conflict_query = db.query(models.Demo).filter(
         models.Demo.assigned_to == user_phone,
-        models.Demo.start_time < end_time_naive,
-        models.Demo.event_end_time > start_time_naive,
-        models.Demo.phase == "Scheduled"
+        models.Demo.start_time < end_time,
+        models.Demo.event_end_time > start_time,
+        models.Demo.phase.in_(["Scheduled", "Rescheduled"])
     )
     if exclude_demo_id:
         demo_conflict_query = demo_conflict_query.filter(models.Demo.id != exclude_demo_id)
@@ -429,14 +433,12 @@ def get_scheduled_meetings(db: Session) -> list[models.Event]:
     return db.query(models.Event).filter(models.Event.event_type == "Meeting", models.Event.phase == "Scheduled").order_by(models.Event.event_time.asc()).all()
 
 def get_all_meetings(db: Session) -> list[models.Event]:
-    """Fetches all meetings, regardless of their phase (Scheduled, Done, etc.)."""
     return db.query(models.Event).filter(models.Event.event_type == "Meeting").order_by(models.Event.event_time.desc()).all()
 
 def get_scheduled_demos(db: Session) -> list[models.Demo]:
     return db.query(models.Demo).filter(models.Demo.phase == "Scheduled").order_by(models.Demo.start_time.asc()).all()
 
 def get_all_demos(db: Session) -> list[models.Demo]:
-    """Fetches all demos, regardless of their phase."""
     return db.query(models.Demo).order_by(models.Demo.start_time.desc()).all()
 
 def get_message_by_id(db: Session, message_id: int):
@@ -445,8 +447,20 @@ def get_message_by_id(db: Session, message_id: int):
 def get_all_messages(db: Session):
     return db.query(models.MessageMaster).order_by(models.MessageMaster.message_name).all()
 
+def generate_unique_code(prefix: str, length: int = 6) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    random_part = ''.join(secrets.choice(alphabet) for _ in range(length))
+    timestamp = datetime.utcnow().strftime("%f")
+    return f"{prefix.upper()}{timestamp}{random_part}"
+
 def create_message(db: Session, message: schemas.MessageMasterCreate):
-    db_message = models.MessageMaster(**message.model_dump())
+    unique_code = generate_unique_code("MSG")
+    
+    db_message = models.MessageMaster(
+        **message.model_dump(),
+        message_code=unique_code
+    )
+    
     db.add(db_message)
     db.commit()
     db.refresh(db_message)
@@ -477,9 +491,17 @@ def get_drip_sequence_by_id(db: Session, drip_id: int):
 def get_all_drip_sequences(db: Session):
     return db.query(models.DripSequence).order_by(models.DripSequence.drip_name).all()
 
+# --- CHANGE: THIS IS THE CORRECTED FUNCTION ---
 def create_drip_sequence(db: Session, drip: schemas.DripSequenceCreate):
-    # Create the main drip sequence record
-    db_drip = models.DripSequence(drip_name=drip.drip_name, created_by=drip.created_by)
+    # Generate a unique drip code before creating the object
+    unique_code = generate_unique_code("DRIP")
+    
+    # Create the main drip sequence record, including the generated code
+    db_drip = models.DripSequence(
+        drip_name=drip.drip_name, 
+        created_by=drip.created_by,
+        drip_code=unique_code  # Add the generated code here
+    )
     db.add(db_drip)
     db.flush() # Use flush to get the ID of the new drip sequence before committing
 
@@ -494,6 +516,7 @@ def create_drip_sequence(db: Session, drip: schemas.DripSequenceCreate):
     db.commit()
     db.refresh(db_drip)
     return db_drip
+
 
 def update_drip_sequence(db: Session, drip_id: int, drip_data: schemas.DripSequenceCreate):
     db_drip = get_drip_sequence_by_id(db, drip_id)
@@ -1005,3 +1028,117 @@ def convert_lead_to_client(db: Session, lead_id: int, conversion_data: schemas.C
     db.commit() # Commit all changes
     db.refresh(lead) # Refresh lead to reflect status change
     return new_client
+
+
+def generate_user_performance_data(db: Session, user_id: int, start_date: date, end_date: date):
+    """
+    Gathers all necessary data for a user performance report from the database.
+    """
+    user = get_user_by_id(db, user_id)
+    if not user:
+        return None
+
+    start_datetime = datetime.combine(start_date, datetime.min.time())
+    end_datetime = datetime.combine(end_date, datetime.max.time())
+
+    # --- KPI Calculations ---
+    new_leads_assigned = db.query(models.Lead).filter(
+        models.Lead.assigned_to == user.username,
+        models.Lead.created_at.between(start_datetime, end_datetime)
+    ).count()
+
+    meetings_completed = db.query(models.Event).filter(
+        models.Event.assigned_to == user.username,
+        models.Event.phase == 'Done',
+        models.Event.event_time.between(start_datetime, end_datetime)
+    ).count()
+
+    demos_completed = db.query(models.Demo).filter(
+        models.Demo.assigned_to == user.usernumber,
+        models.Demo.phase == 'Done',
+        models.Demo.start_time.between(start_datetime, end_datetime)
+    ).count()
+
+    activities_logged = db.query(models.ActivityLog).join(models.Lead).filter(
+        models.Lead.assigned_to == user.username,
+        models.ActivityLog.created_at.between(start_datetime, end_datetime)
+    ).count()
+
+    won_logs = db.query(models.ActivityLog).join(models.Lead).filter(
+        models.Lead.assigned_to == user.username,
+        models.ActivityLog.details.like(f"%Status changed from%to '{models.LeadStatus.WON_DEAL_DONE.value}'%"),
+        models.ActivityLog.created_at.between(start_datetime, end_datetime)
+    ).all()
+    deals_won_count = len(won_logs)
+
+    lost_logs = db.query(models.ActivityLog).join(models.Lead).filter(
+        models.Lead.assigned_to == user.username,
+        models.ActivityLog.details.like(f"%Status changed from%to '{models.LeadStatus.LOST.value}'%"),
+        models.ActivityLog.created_at.between(start_datetime, end_datetime)
+    ).count()
+    
+    # --- START: CORRECTED CONVERSION RATE LOGIC ---
+    # Use the more intuitive "Lead-to-Win" rate for this period.
+    # Formula: (Deals Won in Period) / (New Leads Assigned in Period)
+    conversion_rate = (deals_won_count / new_leads_assigned * 100) if new_leads_assigned > 0 else 0
+    # --- END: CORRECTED CONVERSION RATE LOGIC ---
+
+    # --- Chart & Table Data ---
+    meetings_scheduled = db.query(models.Event).filter(
+        models.Event.assigned_to == user.username,
+        models.Event.created_at.between(start_datetime, end_datetime)
+    ).count()
+
+    demos_scheduled = db.query(models.Demo).filter(
+        models.Demo.scheduled_by == user.username,
+        models.Demo.created_at.between(start_datetime, end_datetime)
+    ).count()
+
+    activity_volume_data = [
+        {"name": "Meetings Scheduled", "value": meetings_scheduled},
+        {"name": "Demos Scheduled", "value": demos_scheduled},
+        {"name": "Meetings Completed", "value": meetings_completed},
+        {"name": "Demos Completed", "value": demos_completed},
+        {"name": "Activities Logged", "value": activities_logged},
+    ]
+
+    leads_in_progress = db.query(models.Lead).filter(
+        models.Lead.assigned_to == user.username,
+        models.Lead.status.notin_([models.LeadStatus.WON_DEAL_DONE.value, models.LeadStatus.LOST.value]),
+        models.Lead.created_at.between(start_datetime, end_datetime)
+    ).count()
+
+    lead_outcome_data = [
+        {"name": "Deals Won", "value": deals_won_count},
+        {"name": "Leads Lost", "value": lost_logs},
+        {"name": "In Progress", "value": leads_in_progress},
+    ]
+
+    deals_won_table_data = []
+    for log in won_logs:
+        lead = log.lead
+        time_to_close = (log.created_at.date() - lead.created_at.date()).days
+        deals_won_table_data.append({
+            "client_name": lead.company_name,
+            "converted_date": log.created_at.date(), # Keep as raw date object for frontend
+            "source": lead.source,
+            "time_to_close": time_to_close
+        })
+
+    return {
+        "kpi_summary": {
+            "new_leads_assigned": new_leads_assigned,
+            "meetings_completed": meetings_completed,
+            "demos_completed": demos_completed,
+            "activities_logged": activities_logged,
+            "deals_won": deals_won_count,
+            "conversion_rate": round(conversion_rate, 1)
+        },
+        "visualizations": {
+            "activity_volume": activity_volume_data,
+            "lead_outcome": lead_outcome_data
+        },
+        "tables": {
+            "deals_won": deals_won_table_data
+        }
+    }

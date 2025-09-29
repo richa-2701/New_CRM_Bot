@@ -23,6 +23,7 @@ class LeadStatus(str, enum.Enum):
     DEMO_SCHEDULED = "Demo Scheduled"
     MEETING_DONE = "Meeting Done"
     DEMO_DONE = "Demo Done"
+    PROPOSAL_SENT = "Proposal Sent"
     WON_DEAL_DONE = "Won/Deal Done" # Added new status
     LOST = "Lost"
 
@@ -34,13 +35,14 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     username = Column(String(100), nullable=False)
+    company_name = Column(String(100), nullable=False, index=True) # New field for multi-tenancy
     usernumber = Column(String(15), unique=True, nullable=False)
     email = Column("Email", String(100), nullable=True)
     department = Column(String(100), nullable=True)
     password = Column("Password", String, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     role = Column(String(50), nullable=False, default="Company User")
-    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     leads = relationship("Lead", back_populates="assigned_to_user")
     reminders = relationship("Reminder", back_populates="user")
     task_history = relationship("TaskHistory", back_populates="user")
@@ -86,8 +88,8 @@ class Lead(Base):
     challenges = Column(Text, nullable=True)
     opportunity_business = Column(String, nullable=True)
     target_closing_date = Column(Date, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     contacts = relationship("Contact", back_populates="lead", cascade="all, delete-orphan")
     assigned_to_user = relationship("User", back_populates="leads")
     meetings = relationship("Meeting", back_populates="lead")
@@ -109,7 +111,7 @@ class ActivityLog(Base):
     phase = Column(String, nullable=False)
     details = Column(Text, nullable=False)
     attachment_path = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="activities")
 
 class Task(Base):
@@ -135,7 +137,7 @@ class Event(Base):
     created_by = Column(String)
     remark = Column(String)
     phase = Column(String, default="Scheduled")
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="events")
 
 class Reminder(Base):
@@ -148,7 +150,7 @@ class Reminder(Base):
     message = Column(String)
     assigned_to = Column(String)
     status = Column(String, default="pending")
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
     is_hidden_from_activity_log = Column(Boolean, default=False)
     lead = relationship("Lead", back_populates="reminders")
     user = relationship("User", back_populates="reminders")
@@ -160,7 +162,7 @@ class TaskHistory(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     action = Column(String)
     details = Column(Text)
-    timestamp = Column(DateTime, default=datetime.now)
+    timestamp = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="task_history")
     user = relationship("User", back_populates="task_history")
 
@@ -171,7 +173,7 @@ class Meeting(Base):
     scheduled_by = Column(String)
     assigned_to = Column(String)
     start_time = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="meetings")
 
 class Demo(Base):
@@ -182,8 +184,8 @@ class Demo(Base):
     assigned_to = Column(String)
     start_time = Column(DateTime)
     event_end_time = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     phase = Column(String, default="Scheduled")
     remark = Column(Text, nullable=True)
     lead = relationship("Lead", back_populates="demos")
@@ -194,7 +196,7 @@ class Feedback(Base):
     lead_id = Column(Integer, ForeignKey("leads.id"))
     feedback_by = Column(String)
     content = Column(Text)
-    created_at = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="feedbacks")
 
 class AssignmentLog(Base):
@@ -206,14 +208,13 @@ class AssignmentLog(Base):
     assigned_at = Column(DateTime, default=datetime.utcnow)
     lead = relationship("Lead", back_populates="AssignmentLogs")
 
-
 class MessageMaster(Base):
     __tablename__ = "MessageMaster"
     id = Column(Integer, primary_key=True, index=True)
-    message_code = Column(String, unique=True, nullable=False, server_default="DEFAULT_CODE") # Handled by DB
+    message_code = Column(String, unique=True, nullable=False, server_default="DEFAULT_CODE")
     message_name = Column(String, nullable=False)
     message_content = Column(Text, nullable=True)
-    message_type = Column(String, nullable=False) # 'text', 'media', 'document'
+    message_type = Column(String, nullable=False)
     attachment_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(String, nullable=False)
@@ -221,7 +222,7 @@ class MessageMaster(Base):
 class DripSequence(Base):
     __tablename__ = "DripSequence"
     id = Column(Integer, primary_key=True, index=True)
-    drip_code = Column(String, unique=True, nullable=False, server_default="DEFAULT_CODE") # Handled by DB
+    drip_code = Column(String, unique=True, nullable=False, server_default="DEFAULT_CODE")
     drip_name = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     created_by = Column(String, nullable=False)
@@ -234,43 +235,32 @@ class DripSequenceStep(Base):
     drip_sequence_id = Column(Integer, ForeignKey("DripSequence.id"), nullable=False)
     message_id = Column(Integer, ForeignKey("MessageMaster.id"), nullable=False)
     day_to_send = Column(Integer, nullable=False)
-    time_to_send = Column(String, nullable=False) # Storing time as string for simplicity
+    time_to_send = Column(String, nullable=False)
     sequence_order = Column(Integer, nullable=False)
-
-    # Relationships
     drip_sequence = relationship("DripSequence", back_populates="steps")
     message = relationship("MessageMaster")
 
-
 class LeadDripAssignment(Base):
-    """Tracks which Lead is assigned to which Drip Sequence."""
     __tablename__ = "LeadDripAssignment"
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
     drip_sequence_id = Column(Integer, ForeignKey("DripSequence.id"), nullable=False)
-
     start_date = Column(Date, nullable=False, default=date.today)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-
     lead = relationship("Lead", back_populates="drip_assignments")
     drip_sequence = relationship("DripSequence", back_populates="lead_assignments")
     sent_messages = relationship("SentDripMessageLog", back_populates="assignment", cascade="all, delete-orphan")
 
-
 class SentDripMessageLog(Base):
-    """Logs which drip message step has been sent for a specific assignment."""
     __tablename__ = "SentDripMessageLog"
     id = Column(Integer, primary_key=True, index=True)
     assignment_id = Column(Integer, ForeignKey("LeadDripAssignment.id"), nullable=False)
     step_id = Column(Integer, ForeignKey("DripSequenceStep.id"), nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
-
     assignment = relationship("LeadDripAssignment", back_populates="sent_messages")
     step = relationship("DripSequenceStep")
 
-
-# NEW CLIENT MODELS
 class Client(Base):
     __tablename__ = "Clients"
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
@@ -297,9 +287,8 @@ class Client(Base):
     amc = Column(String, nullable=True)
     gst = Column(String, nullable=True)
     converted_date = Column(Date, nullable=False, default=date.today)
-    created_at = Column(DateTime, default=datetime.now)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
-
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     contacts = relationship("ClientContact", back_populates="client", cascade="all, delete-orphan")
 
 class ClientContact(Base):
@@ -312,5 +301,4 @@ class ClientContact(Base):
     designation = Column(String, nullable=True)
     linkedIn = Column(String, nullable=True)
     pan = Column(String, nullable=True)
-
     client = relationship("Client", back_populates="contacts")

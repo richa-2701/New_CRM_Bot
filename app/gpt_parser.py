@@ -339,6 +339,10 @@ def parse_intent_and_fields(message: str):
     """
     lowered = message.lower()
 
+    # --- NEW: Added intent for generating a report ---
+    if re.search(r"give report of|generate report for|report of", lowered):
+        return "generate_report", {}
+
     if re.search(r"meeting (is )?done", lowered):
         # Make "meeting done" more specific to avoid conflict with feedback
         return "meeting_done", {}
@@ -369,6 +373,32 @@ def parse_intent_and_fields(message: str):
         return "demo_done", {}
 
     return "unknown", {}
+
+# --- NEW: Function to parse the report request details ---
+def parse_report_request(message: str):
+    """
+    Parses a report request to extract username, start date, and end date.
+    Example: "Give report of Banwari from 01/09/25 to 25/09/25"
+    """
+    # Regex to capture the three key parts: username, start date, end date
+    match = re.search(r'of\s+(.+?)\s+from\s+([\d/.-]+)\s+to\s+([\d/.-]+)', message, re.IGNORECASE)
+    
+    if not match:
+        return None, None, None
+
+    username = match.group(1).strip()
+    start_date_str = match.group(2).strip()
+    end_date_str = match.group(3).strip()
+
+    try:
+        # Use dateparser for robust date conversion
+        start_date = dateparser.parse(start_date_str, settings={'DATE_ORDER': 'DMY'}).date()
+        end_date = dateparser.parse(end_date_str, settings={'DATE_ORDER': 'DMY'}).date()
+        return username, start_date, end_date
+    except Exception:
+        # If dates are invalid
+        return None, None, None
+
 
 def parse_datetime_from_text(text: str) -> datetime:
     """
@@ -403,4 +433,4 @@ def parse_datetime_from_text(text: str) -> datetime:
     else:
         logger.warning(f"⚠️ Could not parse datetime from '{text}'. Defaulting to tomorrow at 12 PM.")
         tomorrow = datetime.now() + timedelta(days=1)
-        return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0) 
+        return tomorrow.replace(hour=12, minute=0, second=0, microsecond=0)

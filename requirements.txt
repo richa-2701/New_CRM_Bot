@@ -1,16 +1,28 @@
+# requirements.txt
+
+# Core FastAPI and Server
 fastapi
-uvicorn
-sqlalchemy
-pydantic
+uvicorn[standard]
 python-dotenv
-requests
+
+# Database
+sqlalchemy
 pyodbc
-apscheduler>=3.10.1
-dateparser
-pandas 
-openpyxl
-python-multipart
+
+# API & Requests
+requests
 httpx
-ics
-pytz
+
+# Data Handling & Utilities
+pandas
+openpyxl
 countryinfo
+python-dateutil
+dateparser
+pytz
+ics
+python-multipart
+
+# PDF & Charting for Reports
+fpdf2
+matplotlib
