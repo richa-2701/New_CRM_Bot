@@ -338,13 +338,14 @@ def parse_intent_and_fields(message: str):
     Detects user's intent using fast regex-based rules.
     """
     lowered = message.lower()
-
-    # --- NEW: Added intent for generating a report ---
-    if re.search(r"give report of|generate report for|report of", lowered):
+    
+    # --- START: MODIFIED INTENT DETECTION ---
+    # The keyword 'for' is now part of the report generation intent, making it more specific.
+    if re.search(r"generate report of|report of .+? for .+? from", lowered):
         return "generate_report", {}
+    # --- END: MODIFIED INTENT DETECTION ---
 
     if re.search(r"meeting (is )?done", lowered):
-        # Make "meeting done" more specific to avoid conflict with feedback
         return "meeting_done", {}
     
     if re.search(r"lead\s+(for|is)\s+.+?\s+is\s+not\s+qualified|not\s+qualified", lowered):
@@ -374,51 +375,43 @@ def parse_intent_and_fields(message: str):
 
     return "unknown", {}
 
-# --- NEW: Function to parse the report request details ---
+# --- START: MODIFIED FUNCTION TO PARSE REPORT REQUEST ---
 def parse_report_request(message: str):
     """
-    Parses a report request to extract username, start date, and end date.
-    Example: "Give report of Banwari from 01/09/25 to 25/09/25"
+    Parses a report request to extract username, company name, start date, and end date.
+    New required format: "Generate report of [username] for [company name] from [dd/mm/yy] to [dd/mm/yy]"
     """
-    # Regex to capture the three key parts: username, start date, end date
-    match = re.search(r'of\s+(.+?)\s+from\s+([\d/.-]+)\s+to\s+([\d/.-]+)', message, re.IGNORECASE)
+    # Regex updated to be more strict and capture multi-word company names correctly.
+    match = re.search(r'of\s+(.+?)\s+for\s+(.+?)\s+from\s+([\d/.-]+)\s+to\s+([\d/.-]+)', message, re.IGNORECASE)
     
     if not match:
-        return None, None, None
+        return None, None, None, None
 
     username = match.group(1).strip()
-    start_date_str = match.group(2).strip()
-    end_date_str = match.group(3).strip()
+    company_name = match.group(2).strip()
+    start_date_str = match.group(3).strip()
+    end_date_str = match.group(4).strip()
 
     try:
-        # Use dateparser for robust date conversion
         start_date = dateparser.parse(start_date_str, settings={'DATE_ORDER': 'DMY'}).date()
         end_date = dateparser.parse(end_date_str, settings={'DATE_ORDER': 'DMY'}).date()
-        return username, start_date, end_date
+        return username, company_name, start_date, end_date
     except Exception:
-        # If dates are invalid
-        return None, None, None
+        return None, None, None, None
+# --- END: MODIFIED FUNCTION ---
 
 
 def parse_datetime_from_text(text: str) -> datetime:
     """
     Parses a natural language string to find a date and time.
-    This version first tries to extract a specific date/time phrase from the text
-    before passing it to the dateparser library for robust parsing.
     """
-    
-    # --- STEP 1: Use regex to find and isolate the date/time part of the string ---
-    # This pattern looks for phrases like "on [date] at [time]", "tomorrow at 5pm", etc.
-    # It helps remove confusing words like "follow up".
     match = re.search(r'(on\s|at\s|tomorrow|today|next\sweek)[\w\s:/]+', text, re.IGNORECASE)
     
-    datetime_string_to_parse = text # Default to the full string
+    datetime_string_to_parse = text
     if match:
-        # If we found a specific phrase, use that for parsing.
         datetime_string_to_parse = match.group(0)
         logger.info(f"🔍 Extracted datetime phrase: '{datetime_string_to_parse}'")
 
-    # --- STEP 2: Configure and run the dateparser ---
     settings = {
         'DATE_ORDER': 'DMY',
         'PREFER_DATES_FROM': 'future',

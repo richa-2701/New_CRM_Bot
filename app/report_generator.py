@@ -6,6 +6,12 @@ from datetime import date
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 import io
+# --- START: NEW IMPORTS ---
+from typing import List, Dict, Any, Tuple
+from app.models import User
+import pandas as pd
+# --- END: NEW IMPORTS ---
+
 
 # We pass UPLOAD_DIRECTORY in as a parameter, so no import from webhook is needed.
 
@@ -18,13 +24,85 @@ LEAD_OUTCOME_COLORS = ['#34A853', '#EA4335', '#9E9E9E'] # Green (Won), Red (Lost
 class ReportPDF(FPDF):
     def header(self):
         self.set_font('Helvetica', 'B', 16)
-        self.cell(0, 10, 'User Performance Report', 0, 1, 'C')
+        # --- START: MODIFICATION FOR DYNAMIC TITLE ---
+        # The title is now set dynamically in the functions that use this class
+        # self.cell(0, 10, 'User Performance Report', 0, 1, 'C')
+        # --- END: MODIFICATION ---
         self.ln(5)
 
     def footer(self):
         self.set_y(-15)
         self.set_font('Helvetica', 'I', 8)
         self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+# --- START: NEW FUNCTION FOR WEEKLY SUMMARY REPORT ---
+def create_weekly_summary_report_pdf(
+    all_users_data: List[Tuple[User, Dict[str, Any]]],
+    start_date: date,
+    end_date: date,
+    company_name: str,
+    upload_directory: str
+) -> str:
+    """
+    Generates a single, consolidated PDF report summarizing the performance of all users.
+    Returns the file path.
+    """
+    pdf = ReportPDF('P', 'mm', 'A4')
+    pdf.add_page()
+    
+    # --- Main Report Header ---
+    pdf.set_font('Helvetica', 'B', 18)
+    pdf.cell(0, 10, f'Weekly Performance Summary: {company_name}', 0, 1, 'C')
+    pdf.set_font('Helvetica', '', 12)
+    date_range_str = f"{start_date.strftime('%d %b, %Y')} to {end_date.strftime('%d %b, %Y')}"
+    pdf.cell(0, 10, f"Period: {date_range_str}", 0, 1, 'C')
+    pdf.ln(10)
+
+    # --- Loop through each user's data and create a section for them ---
+    for user, report_data in all_users_data:
+        # Check if a new page is needed
+        if pdf.get_y() > 220:
+            pdf.add_page()
+
+        # --- User Section Header ---
+        pdf.set_font('Helvetica', 'B', 14)
+        pdf.cell(0, 10, f"Report for: {user.username}", 0, 1, 'L')
+        pdf.set_fill_color(240, 240, 240)
+        pdf.cell(0, 1, '', 'B', 1, 'L')
+        pdf.ln(5)
+
+        # --- User KPIs ---
+        pdf.set_font('Helvetica', '', 11)
+        kpis = report_data['kpi_summary']
+        kpi_items = {
+            "New Leads Assigned": kpis['new_leads_assigned'],
+            "Meetings Completed": kpis['meetings_completed'],
+            "Demos Completed": kpis['demos_completed'],
+            "Activities Logged": kpis['activities_logged'],
+            "Deals Won": kpis['deals_won'],
+            "Conversion Rate": f"{kpis['conversion_rate']}%"
+        }
+        
+        key_col_width = 70
+        value_col_width = 30
+        
+        for title, value in kpi_items.items():
+            pdf.set_font('Helvetica', 'B', 11)
+            pdf.cell(key_col_width, 8, title, 0, 0, 'L')
+            pdf.set_font('Helvetica', '', 11)
+            pdf.cell(value_col_width, 8, str(value), 0, 1, 'R')
+        
+        pdf.ln(10) # Add space between user sections
+
+    # --- Save PDF to a unique file ---
+    file_name = f"weekly_report_{company_name}_{uuid.uuid4().hex[:8]}.pdf"
+    file_path = os.path.join(upload_directory, file_name)
+    pdf.output(file_path)
+    logger.info(f"✅ Weekly summary report generated and saved to: {file_path}")
+    
+    return file_path
+# --- END: NEW FUNCTION ---
+
 
 def create_performance_report_pdf(report_data: dict, username: str, start_date: date, end_date: date, upload_directory: str) -> str:
     """
@@ -34,6 +112,10 @@ def create_performance_report_pdf(report_data: dict, username: str, start_date: 
     pdf = ReportPDF('P', 'mm', 'A4')
     pdf.add_page()
     page_margin = 15
+    
+    # --- Set the title for this specific report ---
+    pdf.set_font('Helvetica', 'B', 16)
+    pdf.cell(0, 10, 'User Performance Report', 0, 1, 'C')
     
     # --- Sub-Header ---
     pdf.set_font('Helvetica', 'B', 12)
@@ -182,3 +264,55 @@ def create_performance_report_pdf(report_data: dict, username: str, start_date: 
     logger.info(f"✅ Performance report generated and saved to: {file_path}")
     
     return file_path
+
+# --- START: NEW FUNCTION FOR EXCEL SUMMARY ---
+def create_summary_excel_report(
+    all_users_data: List[Tuple[User, Dict[str, Any]]],
+    start_date: date,
+    end_date: date,
+    company_name: str,
+    upload_directory: str
+) -> str:
+    """
+    Generates a single Excel file summarizing the performance of all users.
+    Returns the file path.
+    """
+    report_rows = []
+    for user, user_data in all_users_data:
+        if user_data and user_data.get("kpi_summary"):
+            kpis = user_data["kpi_summary"]
+            report_rows.append({
+                "User": user.username,
+                "New Leads Assigned": kpis.get("new_leads_assigned", 0),
+                "Meetings Scheduled": kpis.get("meetings_scheduled", 0),
+                "Demos Scheduled": kpis.get("demos_scheduled", 0),
+                "Meetings Completed": kpis.get("meetings_completed", 0),
+                "Demos Completed": kpis.get("demos_completed", 0),
+                "Activities Logged": kpis.get("activities_logged", 0),
+                "Deals Won": kpis.get("deals_won", 0),
+                "Leads Lost": kpis.get("leads_lost", 0),
+                "Conversion Rate (%)": kpis.get("conversion_rate", 0.0),
+            })
+    
+    if not report_rows:
+        logger.warning(f"No data to generate Excel summary for company '{company_name}'.")
+        return "" # Return empty string if no data
+
+    df = pd.DataFrame(report_rows)
+
+    # Define filename
+    date_str = start_date.strftime('%Y%m%d')
+    file_name = f"summary_report_{company_name}_{date_str}_{uuid.uuid4().hex[:8]}.xlsx"
+    file_path = os.path.join(upload_directory, file_name)
+
+    # Save to Excel
+    try:
+        with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='User Performance Summary')
+        
+        logger.info(f"✅ Excel summary report generated and saved to: {file_path}")
+        return file_path
+    except Exception as e:
+        logger.error(f"❌ Failed to generate Excel summary report: {e}", exc_info=True)
+        return ""
+# --- END: NEW FUNCTION ---

@@ -1,22 +1,17 @@
-# app/db.py
 import os
 import urllib
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
-# --- START OF CHANGE ---
 from fastapi import Request, HTTPException
-# --- END OF CHANGE ---
-
 
 # Load .env variables
 load_dotenv()
 
-# --- START OF CHANGE: DYNAMIC ENGINE MANAGEMENT FOR MULTI-TENANCY ---
+# --- START: DYNAMIC ENGINE MANAGEMENT FOR MULTI-TENANCY ---
 
-# This dictionary will cache engine objects once they are created to avoid
-# recreating them for every request, improving performance.
+# This dictionary caches engine objects to improve performance.
 _engines = {}
 
 # This map defines which environment variable holds the connection string for each company.
@@ -25,12 +20,13 @@ _engines = {}
 COMPANY_TO_ENV_MAP = {
     'Indas Analytics': 'DB_CONN_DEFAULT',
     'Amar Ujala': 'DB_CONN_AMAR_UJALA',
+    # Add more company mappings here as needed
 }
 
 def get_engine(company_name: str):
     """
     Creates and caches a database engine for a specific company.
-    Raises an error if the company is not configured.
+    Raises an HTTPException if the company is not configured.
     """
     # 1. Return cached engine if it exists
     if company_name in _engines:
@@ -50,24 +46,27 @@ def get_engine(company_name: str):
         raise ValueError(f"Environment variable '{env_var_name}' not found for company '{company_name}'")
 
     # 4. Create, cache, and return the new engine
-    params = urllib.parse.quote_plus(conn_str)
-    engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", echo=True)
-    _engines[company_name] = engine
-    
-    print(f"Successfully created engine for company: {company_name}")
-    return engine
+    try:
+        params = urllib.parse.quote_plus(conn_str)
+        engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+        # Test connection
+        connection = engine.connect()
+        connection.close()
+        _engines[company_name] = engine
+        print(f"Successfully created and cached engine for company: {company_name}")
+        return engine
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to connect to the database for company '{company_name}'. Please check the connection string.")
 
-# --- THIS IS THE CENTRAL BASE ---
-# All models will import this Base to register themselves.
+
+# This is the central Base for all SQLAlchemy models.
 Base = declarative_base()
 
 
-# NEW: Dependency for authenticated endpoints.
-# This function will be used for every API call AFTER a user has logged in.
-# It requires the frontend to send the user's company name in a custom header.
 def get_db(request: Request):
     """
     FastAPI dependency that provides a DB session based on the 'X-Company-Name' header.
+    This is used for all authenticated web API calls.
     """
     company_name = request.headers.get("X-Company-Name")
     if not company_name:
@@ -76,30 +75,36 @@ def get_db(request: Request):
             detail="Request is missing the required 'X-Company-Name' header."
         )
 
+    db: Session = None
     try:
         engine = get_engine(company_name)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        db: Session = SessionLocal()
-        try:
-            yield db
-        finally:
-            db.close()
+        db = SessionLocal()
+        yield db
     except (HTTPException, ValueError) as e:
-        # Re-raise exceptions from get_engine
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection failed for company '{company_name}': {str(e)}")
+    finally:
+        if db:
+            db.close()
 
 
-# NEW: Helper function to get a session manually for login/register.
-# This is NOT a dependency. It's called directly from the endpoints.
 def get_db_session_for_company(company_name: str) -> Session:
     """
     Creates a new database session for a specific company.
-    This should be used in a try/finally block.
+    This is used manually for login, registration, and the WhatsApp webhook.
+    It's crucial to use this in a try/finally block to ensure the session is closed.
     """
-    engine = get_engine(company_name)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    return SessionLocal()
+    try:
+        engine = get_engine(company_name)
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        return SessionLocal()
+    except (HTTPException, ValueError) as e:
+        # Re-raise exceptions from get_engine to be handled by the caller
+        raise e
+    except Exception as e:
+        # Catch other potential errors during session creation
+        raise HTTPException(status_code=500, detail=f"Failed to create a database session for company '{company_name}'.")
 
-# --- END OF CHANGE ---
+# --- END: DYNAMIC ENGINE MANAGEMENT FOR MULTI-TENANCY ---

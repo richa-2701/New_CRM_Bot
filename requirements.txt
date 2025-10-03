@@ -26,3 +26,5 @@ python-multipart
 # PDF & Charting for Reports
 fpdf2
 matplotlib
+
+apscheduler

@@ -1,12 +1,7 @@
 # app/reminders.py
-
 from datetime import datetime, date, time, timedelta
 from sqlalchemy.orm import Session
-# --- START OF CHANGE ---
-# REMOVED: from app.db import SessionLocal
-# ADDED: New imports for multi-tenant database handling
 from app.db import get_db_session_for_company, COMPANY_TO_ENV_MAP
-# --- END OF CHANGE ---
 from app.models import Reminder, User, LeadDripAssignment
 from app.message_sender import send_whatsapp_message
 from app.crud import get_active_drip_assignments, get_sent_step_ids_for_assignment, log_sent_drip_message
@@ -48,46 +43,43 @@ async def reminder_loop():
     while True:
         logger.info("⏰ Starting reminder check cycle for all companies...")
         
-        # --- START OF CHANGE: Multi-Tenant Loop ---
-        # Get the list of all company names from the configuration map in db.py
         all_companies = list(COMPANY_TO_ENV_MAP.keys())
         
         for company in all_companies:
             logger.info(f"-> Checking reminders for company: '{company}'")
             
-            # Manually get a database session specifically for this company.
             db: Session = get_db_session_for_company(company)
             
             try:
                 now = datetime.utcnow()
                 
-                # This query now runs on the correct company's database
+                # --- START OF FIX: Corrected the query ---
                 due_reminders_with_users = (
-                    db.query(Reminder, User.usernumber)
+                    db.query(Reminder, User)
                     .join(User, Reminder.user_id == User.id)
                     .filter(
                         Reminder.remind_time <= now, 
-                        Reminder.status == "pending",
-                        Reminder.is_hidden_from_activity_log == False
+                        Reminder.status == "pending"
                     )
                     .all()
                 )
+                # --- END OF FIX ---
 
                 if due_reminders_with_users:
                     logger.info(f"   Found {len(due_reminders_with_users)} due reminders for '{company}'.")
 
-                for reminder, user_phone in due_reminders_with_users:
+                for reminder, user in due_reminders_with_users:
                     try:
-                        if not user_phone:
-                            logger.warning(f"   Skipping reminder ID {reminder.id} for '{company}' because user {reminder.user_id} has no phone number.")
+                        if not user.usernumber:
+                            logger.warning(f"   Skipping reminder ID {reminder.id} for '{company}' because user {user.username} has no phone number.")
                             reminder.status = "failed"
                             continue
 
-                        success = send_whatsapp_message(number=user_phone, message=f"⏰ Reminder: {reminder.message}")
+                        success = send_whatsapp_message(number=user.usernumber, message=f"⏰ Reminder: {reminder.message}")
                         
                         if success:
                             reminder.status = "sent"
-                            logger.info(f"   ✅ Sent reminder ID {reminder.id} for '{company}' to {user_phone}")
+                            logger.info(f"   ✅ Sent reminder ID {reminder.id} for '{company}' to {user.usernumber}")
                         else:
                             reminder.status = "failed"
                             logger.error(f"   ❌ Failed to send reminder ID {reminder.id} for '{company}' via WhatsApp API.")
@@ -96,16 +88,14 @@ async def reminder_loop():
                         reminder.status = "failed"
                         logger.error(f"   ❌ Exception sending reminder ID {reminder.id} for '{company}': {e}", exc_info=True)
                     finally:
-                        db.commit() # Commit the status change for each individual reminder
+                        db.commit()
 
             except Exception as outer_e:
                 logger.error(f"⚠️ An error occurred in the reminder loop for company '{company}': {outer_e}", exc_info=True)
                 db.rollback()
             finally:
-                # This is CRITICAL. Always close the session to prevent connection leaks.
                 db.close()
                 logger.info(f"   Session closed for '{company}'.")
-        # --- END OF CHANGE ---
 
         logger.info("Finished reminder cycle. Waiting for 60 seconds.")
         await asyncio.sleep(60)
@@ -120,7 +110,6 @@ async def drip_campaign_loop():
     while True:
         logger.info("💧 Starting drip campaign check cycle for all companies...")
 
-        # --- START OF CHANGE: Multi-Tenant Loop ---
         all_companies = list(COMPANY_TO_ENV_MAP.keys())
 
         for company in all_companies:
@@ -131,7 +120,6 @@ async def drip_campaign_loop():
                 today = date.today()
                 now = datetime.utcnow().time()
                 
-                # This query now runs on the correct company's database
                 active_assignments = get_active_drip_assignments(db)
                 
                 if not active_assignments:
@@ -176,10 +164,8 @@ async def drip_campaign_loop():
                 logger.error(f"⚠️ An error occurred in the drip campaign loop for '{company}': {outer_e}", exc_info=True)
                 db.rollback()
             finally:
-                # CRITICAL: Always close the session.
                 db.close()
                 logger.info(f"   Session closed for '{company}'.")
-        # --- END OF CHANGE ---
         
         logger.info("Finished drip campaign cycle. Waiting for 5 minutes.")
         await asyncio.sleep(300)

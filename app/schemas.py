@@ -1,5 +1,5 @@
 # app/schemas.py
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, Union, List
 from datetime import datetime, time, date
 
@@ -23,8 +23,8 @@ class ContactBase(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     designation: Optional[str] = None
-    linkedIn: Optional[str] = None # New Field
-    pan: Optional[str] = None # New Field
+    linkedIn: Optional[str] = None
+    pan: Optional[str] = None
 
 class ContactCreate(ContactBase):
     pass
@@ -49,13 +49,31 @@ class ClientContactBase(BaseModel):
 class ClientContactCreate(ClientContactBase):
     pass
 
-class ClientContactUpdate(ClientContactBase): # New Schema for updating client contacts
-    id: Optional[int] = None # Allow ID for existing contacts
+class ClientContactUpdate(ClientContactBase):
+    id: Optional[int] = None
 
 class ClientContactOut(ClientContactBase):
     id: int
     client_id: int
     model_config = ConfigDict(from_attributes=True)
+    
+# --- START: NEW PROPOSAL CONTACT SCHEMAS ---
+class ProposalSentContactBase(BaseModel):
+    contact_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    designation: Optional[str] = None
+    linkedIn: Optional[str] = None
+    pan: Optional[str] = None
+
+class ProposalSentContactCreate(ProposalSentContactBase):
+    pass
+    
+class ProposalSentContactOut(ProposalSentContactBase):
+    id: int
+    proposal_id: int
+    model_config = ConfigDict(from_attributes=True)
+# --- END: NEW PROPOSAL CONTACT SCHEMAS ---
 
 # ---------------- USER SCHEMAS ----------------
 class UserCreate(BaseModel):
@@ -112,13 +130,25 @@ class ActivityLogOut(BaseModel):
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
+class LeadAttachmentBase(BaseModel):
+    file_path: str
+    original_file_name: str
+
+class LeadAttachmentCreate(LeadAttachmentBase):
+    uploaded_by: str
+
+class LeadAttachmentOut(LeadAttachmentBase):
+    id: int
+    uploaded_by: str
+    uploaded_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
 # ---------------- LEAD SCHEMAS ----------------
 class LeadBase(BaseModel):
     company_name: str
     email: Optional[str] = None
-    website: Optional[str] = None # New Field
-    linkedIn: Optional[str] = None # New Field
+    website: Optional[str] = None
+    linkedIn: Optional[str] = None
     address: Optional[str] = None
     address_2: Optional[str] = None
     city: Optional[str] = None
@@ -139,6 +169,11 @@ class LeadBase(BaseModel):
     lead_type: Optional[str] = None
     opportunity_business: Optional[str] = None
     target_closing_date: Optional[date] = None
+    version: Optional[str] = None
+    database_type: Optional[str] = None
+    amc: Optional[str] = None
+    gst: Optional[str] = None
+    company_pan: Optional[str] = None
 
 class LeadCreate(LeadBase):
     created_by: str
@@ -148,11 +183,13 @@ class LeadCreate(LeadBase):
 class LeadResponse(LeadBase):
     id: int
     status: Optional[str]
-    assigned_to: str
+    assigned_to: Optional[str] = None
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime]
+    isActive: bool
     contacts: List[ContactOut] = []
+    attachments: List[LeadAttachmentOut] = []
 
     last_activity: Optional[ActivityLogOut] = None
     model_config = ConfigDict(from_attributes=True)
@@ -160,8 +197,8 @@ class LeadResponse(LeadBase):
 class LeadUpdateWeb(BaseModel):
     company_name: Optional[str] = None
     email: Optional[str] = None
-    website: Optional[str] = None # New Field
-    linkedIn: Optional[str] = None # New Field
+    website: Optional[str] = None
+    linkedIn: Optional[str] = None
     address: Optional[str] = None
     address_2: Optional[str] = None
     city: Optional[str] = None
@@ -184,11 +221,52 @@ class LeadUpdateWeb(BaseModel):
     status: Optional[str] = None
     opportunity_business: Optional[str] = None
     target_closing_date: Optional[date] = None
+    version: Optional[str] = None
+    database_type: Optional[str] = None
+    amc: Optional[str] = None
+    gst: Optional[str] = None
+    company_pan: Optional[str] = None
     contacts: List[ContactUpdate] = []
     activity_type: Optional[str] = None
     activity_details: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+# --- START: NEW PROPOSAL SCHEMAS ---
+class ProposalSentBase(LeadBase):
+    gst: str = Field(..., min_length=1) # GST is mandatory
+
+class ConvertToProposalPayload(BaseModel):
+    company_name: Optional[str] = None
+    email: Optional[str] = None
+    gst: str = Field(..., min_length=1)
+    company_pan: Optional[str] = None
+    version: Optional[str] = None
+    database_type: Optional[str] = None
+    amc: Optional[str] = None
+    contacts: List[ContactCreate] = []
+
+class ProposalSentCreate(ProposalSentBase):
+    original_lead_id: int
+    created_by: str
+    assigned_to: str
+    contacts: List[ProposalSentContactCreate]
+
+class ProposalSentOut(ProposalSentBase):
+    id: int
+    original_lead_id: int
+    created_by: str
+    assigned_to: str
+    created_at: datetime
+    updated_at: datetime
+    converted_at: datetime
+    contacts: List[ProposalSentContactOut] = []
+    
+    # You might want to include activities/reminders here later
+    # last_activity: Optional[...] = None 
+
+    model_config = ConfigDict(from_attributes=True)
+# --- END: NEW PROPOSAL SCHEMAS ---
 
 # NEW CLIENT SCHEMAS
 class ClientBase(BaseModel):
@@ -217,10 +295,10 @@ class ClientBase(BaseModel):
     converted_date: Optional[date] = None
 
 class ClientCreate(ClientBase):
-    contacts: List[ClientContactCreate] = [] # Clients can have contacts too
+    contacts: List[ClientContactCreate] = []
 
-class ClientUpdate(ClientBase): # NEW: Schema for updating existing clients
-    company_name: Optional[str] = None # Make company name optional for updates
+class ClientUpdate(ClientBase):
+    company_name: Optional[str] = None
     contacts: List[ClientContactUpdate] = []
     model_config = ConfigDict(from_attributes=True)
 
@@ -231,9 +309,7 @@ class ClientOut(ClientBase):
     contacts: List[ClientContactOut] = []
     model_config = ConfigDict(from_attributes=True)
 
-# SCHEMA FOR LEAD CONVERSION PAYLOAD
 class ConvertLeadToClientPayload(BaseModel):
-    # Fields to potentially update or add during conversion
     company_name: Optional[str] = None
     website: Optional[str] = None
     linkedIn: Optional[str] = None
@@ -257,7 +333,7 @@ class ConvertLeadToClientPayload(BaseModel):
     amc: Optional[str] = None
     gst: Optional[str] = None
     converted_date: Optional[date] = None
-    contacts: List[ClientContactCreate] = [] # Use ClientContactCreate for contacts during conversion
+    contacts: List[ClientContactCreate] = []
 
 # ---------------- TASK SCHEMAS ----------------
 class TaskOut(BaseModel):
@@ -271,7 +347,9 @@ class TaskOut(BaseModel):
 
 # ---------------- EVENT SCHEMAS ----------------
 class EventBase(BaseModel):
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None
+    client_id: Optional[int] = None # <-- NEW
     assigned_to: str
     event_type: str
     meeting_type: Optional[str] = None
@@ -290,22 +368,25 @@ class EventOut(EventBase):
     model_config = ConfigDict(from_attributes=True)
 
 # ---------------- DEMO SCHEMAS ----------------
-class DemoOut(BaseModel):
+class DemoOut(BaseModel): # Or whatever your base class is
     id: int
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None
+    client_id: Optional[int] = None
     scheduled_by: str
     assigned_to: str
     start_time: datetime
-    event_end_time: Optional[datetime]
+    event_end_time: Optional[datetime] = None
     phase: str
-    remark: Optional[str]
+    remark: Optional[str] = None
     created_at: datetime
-    updated_at: Optional[datetime]
+    updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 # ---------------- WEB FORM SCHEMAS ----------------
 class MeetingScheduleWeb(BaseModel):
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None # <-- NEW
     assigned_to_user_id: int
     start_time: datetime
     end_time: datetime
@@ -318,7 +399,8 @@ class PostMeetingWeb(BaseModel):
     updated_by: str
 
 class DemoScheduleWeb(BaseModel):
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None # <-- NEW
     assigned_to_user_id: int
     start_time: datetime
     end_time: datetime
@@ -331,13 +413,14 @@ class PostDemoWeb(BaseModel):
 
 # ---------------- OTHER SCHEMAS ----------------
 class ReminderCreate(BaseModel):
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None # <-- NEW
     remind_time: datetime
     message: str
     assigned_to: str
     user_id: int
     activity_type: Optional[str] = "Follow-up"
-    is_hidden_from_activity_log: Optional[bool] = False # <--- NEW FIELD
+    is_hidden_from_activity_log: Optional[bool] = False
 
 
 class HistoryItemOut(BaseModel):
@@ -354,7 +437,7 @@ class AssignmentLogCreate(BaseModel):
 class MessageMasterBase(BaseModel):
     message_name: str
     message_content: Optional[str] = None
-    message_type: str # 'text', 'media', 'document'
+    message_type: str
     attachment_path: Optional[str] = None
 
 class MessageMasterCreate(MessageMasterBase):
@@ -371,11 +454,10 @@ class MessageMasterOut(MessageMasterBase):
 
     model_config = ConfigDict(from_attributes=True)
 
-# --- Drip Sequence Schemas ---
 class DripSequenceStepBase(BaseModel):
     message_id: int
     day_to_send: int
-    time_to_send: time # Use `time` for validation
+    time_to_send: time
     sequence_order: int
 
 class DripSequenceStepCreate(DripSequenceStepBase):
@@ -388,9 +470,7 @@ class DripSequenceCreate(BaseModel):
 
 class DripSequenceStepOut(DripSequenceStepBase):
     id: int
-    # Include message details in the response for the frontend
     message: MessageMasterOut
-
     model_config = ConfigDict(from_attributes=True)
 
 class DripSequenceOut(BaseModel):
@@ -400,10 +480,9 @@ class DripSequenceOut(BaseModel):
     created_at: datetime
     created_by: str
     steps: list[DripSequenceStepOut]
-
     model_config = ConfigDict(from_attributes=True)
 
-class DripSequenceListOut(BaseModel): # For the main list view
+class DripSequenceListOut(BaseModel):
     id: int
     drip_code: str
     drip_name: str
@@ -413,14 +492,13 @@ class DripSequenceListOut(BaseModel): # For the main list view
 
 class ReminderOut(BaseModel):
     id: int
-    lead_id: int # We need the lead_id to link back to the lead
+    lead_id: int
     remind_time: datetime
     message: str
     assigned_to: str
     status: str
     created_at: datetime
-    is_hidden_from_activity_log: bool # <--- NEW FIELD
-    # --- ADD THIS LINE ---
+    is_hidden_from_activity_log: bool
     model_config = ConfigDict(from_attributes=True)
 
 class MarkActivityDonePayload(BaseModel):
@@ -429,7 +507,7 @@ class MarkActivityDonePayload(BaseModel):
 
 class UnifiedActivityOut(BaseModel):
     id: int
-    type: str  # 'log' or 'reminder'
+    type: str
     lead_id: int
     company_name: str
     activity_type: str
@@ -437,16 +515,15 @@ class UnifiedActivityOut(BaseModel):
     status: str
     created_at: datetime
     scheduled_for: Optional[datetime] = None
-
     model_config = ConfigDict(from_attributes=True)
 
 class StatusMessage(BaseModel):
-    """A generic response model for success/error messages."""
     status: str
     message: str
 
 class ScheduleActivityWeb(BaseModel):
-    lead_id: int
+    lead_id: Optional[int] = None
+    proposal_id: Optional[int] = None # <-- NEW
     details: str
     activity_type: str
     created_by_user_id: int
